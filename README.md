@@ -96,3 +96,13 @@ liability and warranty terms in the [MIT License](./LICENSE).)
 **Name history.** Project was originally scaffolded as "SOQLForge", briefly
 renamed to "SOQLNav", and is now "SoqlForge". The repo directory
 (`winSFExplorer`) is the original working title.
+
+---
+
+<div align="center">
+
+⚒ **Built by [Ask the Forge](https://asktheforge.com)** ⚒
+
+Free, open-source tools for the Salesforce community.
+
+</div>

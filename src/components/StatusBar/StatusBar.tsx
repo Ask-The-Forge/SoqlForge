@@ -4,6 +4,7 @@
 
 import { useAppStore } from "../../stores/appStore";
 import { useUpdater } from "../../hooks/useUpdater";
+import { AskTheForgeLink } from "../shared/AskTheForge";
 import type { QueryResult } from "../../lib/tauriClient";
 
 interface StatusBarProps {
@@ -56,33 +57,39 @@ export function StatusBar({ result, isRunning }: StatusBarProps) {
         </>
       )}
 
-      {/* Update prompt — pushed to the far right. Only rendered once a newer
-          signed release is found; otherwise the updater sits silent. */}
-      {updater.phase !== "idle" && (
-        <div className="ml-auto flex items-center gap-2">
-          {updater.phase === "available" && (
-            <button
-              type="button"
-              onClick={updater.install}
-              title={updater.notes ?? undefined}
-              className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
-            >
-              Update to {updater.version} available — install &amp; restart
-            </button>
-          )}
-          {updater.phase === "downloading" && (
-            <span className="text-blue-400">downloading update…</span>
-          )}
-          {updater.phase === "installed" && (
-            <span className="text-emerald-400">installed — restarting…</span>
-          )}
-          {updater.error && (
-            <span className="text-red-400" title={updater.error}>
-              update failed
-            </span>
-          )}
-        </div>
-      )}
+      {/* Right cluster: update prompt (only when a newer signed release is
+          found) followed by the persistent Ask the Forge promo. */}
+      <div className="ml-auto flex items-center gap-3">
+        {updater.phase !== "idle" && (
+          <div className="flex items-center gap-2">
+            {updater.phase === "available" && (
+              <button
+                type="button"
+                onClick={updater.install}
+                title={updater.notes ?? undefined}
+                className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
+              >
+                Update to {updater.version} available — install &amp; restart
+              </button>
+            )}
+            {updater.phase === "downloading" && (
+              <span className="text-blue-400">downloading update…</span>
+            )}
+            {updater.phase === "installed" && (
+              <span className="text-emerald-400">installed — restarting…</span>
+            )}
+            {updater.error && (
+              <span className="text-red-400" title={updater.error}>
+                update failed
+              </span>
+            )}
+            <span className="text-zinc-700">·</span>
+          </div>
+        )}
+        <AskTheForgeLink className="text-zinc-500 hover:text-amber-400 transition-colors">
+          ⚒ Built by Ask the Forge
+        </AskTheForgeLink>
+      </div>
     </div>
   );
 }

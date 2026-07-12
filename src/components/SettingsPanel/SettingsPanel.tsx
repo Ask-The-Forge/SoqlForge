@@ -19,6 +19,7 @@ import {
   toAppError,
 } from "../../lib/tauriClient";
 import { useAppStore } from "../../stores/appStore";
+import { AskTheForgeLink } from "../shared/AskTheForge";
 
 type AiProvider = "claude" | "gemini" | "openai";
 
@@ -336,6 +337,20 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             >
               Clear query history
             </button>
+          </section>
+
+          <section className="flex flex-col gap-2 mt-auto pt-4 border-t border-zinc-800">
+            <h3 className="text-xs uppercase text-zinc-500 tracking-wide">
+              About
+            </h3>
+            <p className="text-xs text-zinc-500">
+              SoqlForge is a free, open-source project from{" "}
+              <AskTheForgeLink className="text-amber-400 hover:text-amber-300 underline underline-offset-2" />
+              . Provided as-is, with no warranty.
+            </p>
+            <AskTheForgeLink className="self-start text-xs text-amber-400 hover:text-amber-300 border border-amber-500/30 rounded px-2 py-1">
+              ⚒ Visit asktheforge.com
+            </AskTheForgeLink>
           </section>
         </div>
       </div>
