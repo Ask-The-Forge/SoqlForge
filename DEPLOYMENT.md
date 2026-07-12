@@ -1,207 +1,137 @@
-# Deployment — Advanced Installer + internal updates
+# Deployment — installers + auto-update
 
-End-to-end guide for packaging SoqlForge as an MSI via **Advanced Installer**
-(Enterprise tier or higher) and pushing updates from an internal host.
+SoqlForge ships as a Windows installer built entirely by **Tauri's own
+bundler** (NSIS `.exe` + MSI). Auto-update is handled by the **Tauri updater
+plugin**, which pulls signed releases from **GitHub Releases**. No third-party
+installer tooling or license is required.
 
-## Prerequisites
+There are two paths:
 
-- **Build machine** with:
-  - Node 18+ (`npm`)
-  - Rust + cargo via `rustup`
-  - Visual Studio Build Tools 2019+ (C++ workload)
-  - WebView2 runtime (ships with Windows 10/11 1809+)
-- **Advanced Installer** Enterprise or Architect. The Updates feature is
-  not in Professional — confirm your license before going further.
-- **An internal host** that serves HTTPS (or at least HTTP) — anything works:
-  IIS, nginx on the dev box, an Azure Blob with public-read, a SharePoint
-  document library mapped to an HTTPS endpoint. The app's updater just GETs
-  two URLs: `updates.xml` and the new `.msi`.
+- **CI release (the real one)** — push a `v*` tag; GitHub Actions builds the
+  signed installers, generates the updater manifest, and publishes a Release.
+  Installed apps then update themselves.
+- **Local build** — `scripts/release.ps1` produces the same installers on your
+  machine for a quick test. These are unsigned unless you export the signing
+  env vars, so they can't drive auto-update — that's what CI is for.
 
 ---
 
-## 1. Build the release binary
+## One-time setup: the updater signing key
+
+Tauri's updater refuses any download that isn't signed by *your* key. You
+generate a keypair once. The **private** key is a secret; the **public** key
+ships in the app.
 
 ```powershell
-# PowerShell 7 (recommended):
+# Generates a keypair. You'll be prompted for a password — remember it.
+npx tauri signer generate -w soqlforge.key
+```
+
+This writes `soqlforge.key` (private) and `soqlforge.key.pub` (public).
+`*.key` / `*.key.pub` are git-ignored — **do not commit them.**
+
+Then:
+
+1. **Public key** → paste the contents of `soqlforge.key.pub` into
+   [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json) at
+   `plugins.updater.pubkey`, replacing `REPLACE_WITH_UPDATER_PUBLIC_KEY`.
+   Commit that change.
+2. **Private key** → add two repository secrets in GitHub
+   (**Settings → Secrets and variables → Actions**):
+   - `TAURI_SIGNING_PRIVATE_KEY` — the full contents of `soqlforge.key`
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password you chose
+3. Store `soqlforge.key` + its password somewhere safe (a password manager).
+   If you lose it, existing installs can no longer auto-update to any build
+   signed with a *new* key — they'd need a manual reinstall.
+
+> **Keep the same key for the life of the product.** Rotating it breaks the
+> update path for everyone already on an old version.
+
+---
+
+## Cutting a release
+
+The app version in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json)
+(`version`) is the single source of truth. Bump it, commit, then tag:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+That triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which:
+
+1. Builds the release (Rust + Vite) on `windows-latest`.
+2. Bundles the NSIS `.exe` and MSI installers.
+3. Signs the updater artifacts with your private key and emits `latest.json`.
+4. Creates a GitHub Release named `SoqlForge v0.2.0` and uploads the
+   installers + `latest.json` as assets.
+
+The tag and the `version` field should match (`v0.2.0` ↔ `0.2.0`).
+
+---
+
+## How auto-update works
+
+- The app is configured (in `tauri.conf.json → plugins.updater`) to poll:
+  ```
+  https://github.com/Ask-The-Forge/SoqlForge/releases/latest/download/latest.json
+  ```
+  That URL always resolves to the newest release's manifest.
+- On startup the frontend calls the updater once
+  ([`src/hooks/useUpdater.ts`](src/hooks/useUpdater.ts)). If a newer signed
+  version exists, a subtle **"Update to X available"** prompt appears in the
+  status bar. Nothing downloads until the user clicks it.
+- On click: the plugin downloads the new installer, verifies its signature
+  against the embedded public key, installs it (`passive` mode — a small
+  progress UI, no wizard clicks), and relaunches into the new version.
+
+A failed or unreachable check never disrupts the app — it just stays silent.
+
+---
+
+## Local test build (no release)
+
+```powershell
+# PowerShell 7:
 pwsh scripts/release.ps1
-
-# Windows PowerShell 5.1 (default install):
+# Windows PowerShell 5.1:
 powershell -ExecutionPolicy Bypass -File scripts/release.ps1
+
+# Bump the version at the same time:
+pwsh scripts/release.ps1 -Version 0.2.0
 ```
 
-What it does:
-
-- Reads `src-tauri/tauri.conf.json` for the version.
-- Runs `npm run tauri build` — Rust release build (5–10 min cold, ~30s
-  warm) + Vite production bundle.
-- Stages `dist-release/<version>/` with:
-  - `soqlforge.exe` — the bare executable to feed Advanced Installer
-  - `tauri-msi/` — Tauri's own MSI (handy reference / interim distro)
-  - `tauri-nsis/` — Tauri's own NSIS installer (same)
-
-To bump the version in one step:
-
-```powershell
-pwsh scripts/release.ps1 -Version 1.2.0
-```
-
-This writes `1.2.0` back into `tauri.conf.json` so the next AI build picks
-up the matching ProductVersion.
-
-> **WebView2 dependency.** Win10 1809+ ships WebView2; older boxes need
-> the Evergreen Standalone Installer or Bootstrapper. Advanced Installer
-> can chain that in as a **Prerequisite** so the user never sees the gap.
+Installers land in `dist-release/<version>/{nsis,msi}/`. These are for local
+testing; they're unsigned (unless you set `TAURI_SIGNING_PRIVATE_KEY` /
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in your shell first) and won't be accepted
+by the auto-updater.
 
 ---
 
-## 2. One-time Advanced Installer project setup
+## Code signing the installer (optional)
 
-> **TL;DR**: the project lives at `SoqlForge.aip` (repo root) and has
-> already been bootstrapped via a mix of GUI + AI CLI. The first
-> `dist-release/0.1.0/SoqlForge-0.1.0.msi` is built. See
-> [`installer/README.md`](./installer/README.md) for the full state and
-> what's left for the GUI (Updater + Prerequisites).
-> The rest of this section explains the *why* behind those values.
+The updater signature above authenticates *updates*; it is separate from
+**Authenticode**, which is what silences Windows SmartScreen on first install.
+They're independent — the updater works without Authenticode.
 
-Open Advanced Installer and create a new project:
-
-1. **File → New → Enterprise** (Architect also works)
-2. Save the project as `installer/SoqlForge.aip` (commit alongside the repo
-   if you want — `.aip` is XML, diffs reasonably)
-3. **Product Details** page:
-   - Product Name: `SoqlForge`
-   - Product Version: match `tauri.conf.json` (`0.1.0`)
-   - Manufacturer: `<Your Company>`
-   - Generate a fresh GUID for **Product Code** (regenerate on every
-     version bump — AI does this automatically when you toggle "auto-
-     generate new Product Code")
-   - **Upgrade Code stays the same forever** for the lifetime of the
-     product. Don't regenerate this one.
-4. **Files and Folders → Application Folder**:
-   - Add file: `dist-release\0.1.0\soqlforge.exe`
-   - AI will detect WebView2 references and (optionally) prompt to add a
-     prerequisite — accept that
-5. **Shortcuts**:
-   - Start Menu Programs Folder → "SoqlForge" → target `soqlforge.exe`
-   - Desktop (optional) — same target
-6. **Install Parameters**:
-   - Per-user install (no admin needed): set the **Install Folder** to
-     `[LocalAppDataFolder]Programs\SoqlForge\`
-   - Per-machine: leave default (`[ProgramFiles64Folder]SoqlForge\`) —
-     requires UAC at install time
-7. **Build → Build Setup** to produce the initial MSI. Test-install it
-   on a clean VM.
+If you have a code-signing certificate, point Tauri at it via
+`bundle.windows.signCommand` (or the `certificateThumbprint` /
+`signingIdentity` options) in `tauri.conf.json`. An EV certificate clears
+SmartScreen immediately; a standard OV cert builds reputation over time.
+Without one, users get a dismissable SmartScreen warning on the first install
+only.
 
 ---
 
-## 3. Wire up Updates
+## Prerequisites (build machine / CI)
 
-Advanced Installer's **Updater** feature ships a small `updater.exe`
-alongside your app. At launch (or on a schedule) it fetches a small XML
-manifest from a URL you configure, compares versions, and silently (or
-with-UI) downloads + runs the newer MSI.
-
-### 3a. In Advanced Installer
-
-1. **Updater** page (left nav under "Resources"):
-   - **URL** → the full URL where the manifest will live, e.g.
-     `https://intranet.yourco.com/soqlforge/updates.xml`
-   - **Update frequency** → typical: "Every 7 days, on application start"
-   - **Update mode** → for internal silent rollouts, pick:
-     - "Silent" — installs in the background, prompts to relaunch
-     - "Prompt user" — user gets a "New version available" dialog
-   - **Add to PATH** the updater so it runs out of the install dir
-2. **Build** the MSI again — `updater.exe` is now bundled.
-
-### 3b. Hosting the manifest + MSI
-
-Pick any host that can serve static files over HTTP(S):
-
-```
-https://intranet.yourco.com/soqlforge/
-  ├── updates.xml
-  ├── SoqlForge-0.1.0.msi
-  ├── SoqlForge-1.0.0.msi
-  └── SoqlForge-1.1.0.msi    ← newest
-```
-
-`updates.xml` is generated by Advanced Installer (Updater → "Generate
-updates file"). Looks like:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<Update Version="2.0">
-  <UpdateVersion>1.1.0</UpdateVersion>
-  <UpdateURL>https://intranet.yourco.com/soqlforge/SoqlForge-1.1.0.msi</UpdateURL>
-  <UpdateMD5>…</UpdateMD5>
-  <Title>SoqlForge 1.1.0</Title>
-  <Description>Fixes the subquery column display, adds inline editing</Description>
-  <MinimumVersion>0.1.0</MinimumVersion>
-</Update>
-```
-
-Just upload the new MSI and the regenerated `updates.xml`. That's it —
-installed apps will pick it up on their next check.
-
-### 3c. The release loop (per version)
-
-After the one-time AI setup, releases are one command:
-
-```powershell
-# Bump + build Tauri exe + drive AI CLI to produce MSI + updates.xml
-powershell -ExecutionPolicy Bypass `
-  -File scripts\build-msi.ps1 `
-  -Version 1.1.0
-
-# Then push to host:
-robocopy `
-  dist-release\1.1.0 `
-  \\fileserver\soqlforge `
-  SoqlForge-1.1.0.msi updates.xml `
-  /Z
-```
-
-`build-msi.ps1` calls `release.ps1` (Tauri build), then drives
-`AdvancedInstaller.com` to bump the .aip's ProductVersion, refresh the
-bundled `soqlforge.exe`, build the MSI, and regenerate `updates.xml`.
-
-> **Only need to rebuild the MSI without a Tauri rebuild?**
-> Add `-SkipTauriBuild` — it'll reuse whatever's in `dist-release/<ver>/`.
-
-Users on the previous version will see the update on their next launch
-(or sooner, depending on the frequency you picked).
-
----
-
-## 4. Internal distribution
-
-For the **first install** (no AI updater yet), distribute the MSI however
-you'd distribute any internal installer:
-
-| Method | When it fits |
-| --- | --- |
-| Email a link to the MSI on the share | small team, one-off |
-| Group Policy MSI deployment | IT-managed fleet, machines log in to AD |
-| Intune / Configuration Manager | larger org, mixed-device |
-| `winget install --manifest …` | dev-heavy team comfortable with CLI |
-| SharePoint download | minimal infrastructure |
-
-After the first install, the AI updater handles everything subsequent.
-
----
-
-## 5. Code signing (recommended, not required for internal)
-
-Unsigned MSIs run fine internally but SmartScreen will warn first-launch.
-If you have a code-signing certificate:
-
-- Advanced Installer → **Digital Signature** → import the cert / smart
-  card → it'll sign both the MSI and the wrapped `soqlforge.exe`.
-- A "Standard" code-signing cert silences SmartScreen after enough
-  installs build reputation. An **EV** cert silences it on day 1.
-
-If you don't have one, internal users can dismiss the SmartScreen prompt
-and the AI updater will use the same cert chain for subsequent updates.
+- Node 18+ (`npm`)
+- Rust + cargo via `rustup`
+- Visual Studio Build Tools 2019+ (C++ workload)
+- WebView2 runtime — ships with Windows 10 1809+; Tauri's NSIS installer
+  downloads it automatically on older boxes.
 
 ---
 
@@ -209,29 +139,28 @@ and the AI updater will use the same cert chain for subsequent updates.
 
 | Thing | Where it lives |
 | --- | --- |
-| App version (single source of truth) | `src-tauri/tauri.conf.json` → `version` |
-| Build script | `scripts/release.ps1` |
-| Release artifacts (per version) | `dist-release/<version>/` |
-| Tauri's fallback installers | `dist-release/<version>/tauri-{msi,nsis}/` |
-| Advanced Installer project | `SoqlForge.aip` (repo root) |
-| Updater manifest | `updates.xml` (AI generates each build) |
-| Hosting target | whichever internal HTTPS URL you configured in the Updater page |
+| App version (source of truth) | `src-tauri/tauri.conf.json` → `version` |
+| Updater config (endpoint + pubkey) | `src-tauri/tauri.conf.json` → `plugins.updater` |
+| Update check (frontend) | `src/hooks/useUpdater.ts` |
+| Release workflow | `.github/workflows/release.yml` |
+| Local build script | `scripts/release.ps1` |
+| Signing key secrets | GitHub repo → Settings → Secrets → Actions |
+| Published installers + `latest.json` | GitHub Releases |
 
 ---
 
 ## Troubleshooting
 
-- **"WebView2 runtime not found" at first launch.** Configure the
-  WebView2 Bootstrapper as a Prerequisite in AI (it's offered automatically
-  when you import the exe). Ships ~140KB; downloads the runtime if missing.
-- **Updater never finds the update.** Confirm the URL in the installed
-  app's `<install-dir>\updater.ini` matches where you uploaded
-  `updates.xml`. Check the `UpdateVersion` in the XML is strictly higher
-  than the installed `ProductVersion`.
-- **MD5 mismatch when downloading.** Regenerate `updates.xml` whenever
-  you re-upload the MSI — AI hashes the MSI when generating the manifest.
-- **User has the app open during update.** AI's silent mode prompts the
-  user to close the app, then runs the upgrade. For zero-interaction
-  rollouts, schedule the updater check at a time the app is unlikely to be
-  open (e.g. on next launch) or use the per-user install location so
-  multiple versions can coexist temporarily.
+- **CI release fails at the bundling step with a signing error.** The
+  `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` secrets are missing or wrong, or
+  `plugins.updater.pubkey` is still the placeholder. Regenerate/re-paste per
+  the setup section.
+- **App never sees an update.** Confirm the new release is *published* (not a
+  draft) and that its `latest.json` lists a version strictly higher than the
+  installed one. The endpoint resolves to `releases/latest/download/…`, so a
+  draft release won't be picked up.
+- **"Signature verification failed" on download.** The public key in
+  `tauri.conf.json` doesn't match the private key CI signed with. They must be
+  the same pair.
+- **SmartScreen warning on first install.** Expected for an unsigned (no
+  Authenticode) installer — dismiss it, or add a code-signing cert (above).

@@ -1,21 +1,28 @@
 <#
 .SYNOPSIS
-  Build a release of SoqlForge and stage the artifacts that Advanced
-  Installer needs to ingest.
+  Build a release of SoqlForge locally using Tauri's native bundler.
 
 .DESCRIPTION
+  Produces the same NSIS + MSI installers that the GitHub Actions release
+  workflow ships — handy for a local test build or a manual one-off. For
+  the signed, auto-update-capable release, push a `v*` tag and let
+  .github/workflows/release.yml build it (see DEPLOYMENT.md).
+
   Workflow:
     1. Reads the version from src-tauri/tauri.conf.json (single source of
        truth - bump that file, everything else follows).
     2. Runs `npm run tauri build` (release Rust + Vite frontend bundle).
-    3. Copies the produced soqlforge.exe + Tauri's NSIS/MSI bundles into
-       a clean dist-release\<version>\ directory for hand-off.
-    4. Prints the paths you'll point Advanced Installer at.
+    3. Copies the produced NSIS + MSI installers into a clean
+       dist-release\<version>\ directory.
+
+  NOTE: a *local* build produces unsigned updater artifacts unless the
+  TAURI_SIGNING_PRIVATE_KEY / _PASSWORD env vars are set. Unsigned builds
+  install fine but won't be accepted by the auto-updater — that's what the
+  CI release path is for.
 
 .PARAMETER Version
   Optional. Overrides the version from tauri.conf.json. If supplied, the
-  script ALSO writes the new version back to tauri.conf.json so subsequent
-  builds line up with the Advanced Installer ProductVersion.
+  script ALSO writes the new version back to tauri.conf.json.
 
 .PARAMETER SkipBuild
   Skip the cargo build (useful when you only want to re-stage the
@@ -96,34 +103,25 @@ $stageRoot = Join-Path $repoRoot "dist-release\$ver"
 if (Test-Path $stageRoot) { Remove-Item -Recurse -Force $stageRoot }
 New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
 
-# Bare executable - what you'd point Advanced Installer's "Files and Folders" at.
-Copy-Item $exePath (Join-Path $stageRoot 'soqlforge.exe')
-
-# Tauri's own NSIS + MSI artifacts (handy reference / fallback distribution
-# while the AI project is still being authored).
+# Tauri's NSIS + MSI installers — the distributable artifacts.
 if (Test-Path $nsisDir) {
-  Copy-Item $nsisDir -Destination (Join-Path $stageRoot 'tauri-nsis') -Recurse
+  Copy-Item $nsisDir -Destination (Join-Path $stageRoot 'nsis') -Recurse
 }
 if (Test-Path $msiDir) {
-  Copy-Item $msiDir -Destination (Join-Path $stageRoot 'tauri-msi') -Recurse
+  Copy-Item $msiDir -Destination (Join-Path $stageRoot 'msi') -Recurse
 }
 
 Write-Host ''
 Write-Host "OK - Staged release in $stageRoot" -ForegroundColor Green
 Write-Host ''
-Write-Host 'Hand-off to Advanced Installer:' -ForegroundColor Cyan
-Write-Host "  Exe:        $stageRoot\soqlforge.exe"
-if (Test-Path (Join-Path $stageRoot 'tauri-nsis')) {
-  Write-Host "  NSIS:       $stageRoot\tauri-nsis\"
+Write-Host 'Installers:' -ForegroundColor Cyan
+if (Test-Path (Join-Path $stageRoot 'nsis')) {
+  Write-Host "  NSIS (.exe):  $stageRoot\nsis\"
 }
-if (Test-Path (Join-Path $stageRoot 'tauri-msi')) {
-  Write-Host "  MSI:        $stageRoot\tauri-msi\"
+if (Test-Path (Join-Path $stageRoot 'msi')) {
+  Write-Host "  MSI:          $stageRoot\msi\"
 }
 Write-Host ''
-Write-Host 'Next steps (see DEPLOYMENT.md for detail):'
-Write-Host '  1. Open the SoqlForge.aip project in Advanced Installer'
-Write-Host '  2. Project > Product Details > set Product Version to' $ver
-Write-Host '  3. Files and Folders > Application Folder > refresh from'
-Write-Host "       $stageRoot\soqlforge.exe"
-Write-Host '  4. Build > produces SoqlForge-<ver>.msi'
-Write-Host '  5. Upload MSI + regenerated updates.xml to internal host'
+Write-Host 'This is a LOCAL build. For a signed, auto-updating release,'
+Write-Host "push a tag instead:  git tag v$ver && git push origin v$ver"
+Write-Host '(see DEPLOYMENT.md).'

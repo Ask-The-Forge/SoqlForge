@@ -1,0 +1,57 @@
+name: Release
+
+# Cut a release by pushing a tag, e.g.:
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# This builds the signed NSIS + MSI installers, generates the updater's
+# `latest.json`, and publishes them all to a GitHub Release. Installed apps
+# poll the release's `latest.json` and self-update (see tauri.conf.json →
+# plugins.updater).
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           contents of the private key file
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the password set when generating it
+# Generate the keypair once with:  npx tauri signer generate -w soqlforge.key
+# and paste the matching PUBLIC key into tauri.conf.json → plugins.updater.pubkey.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# tauri-action needs to create the release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # ${__VERSION__} is filled from tauri.conf.json at build time.
+          tagName: ${{ github.ref_name }}
+          releaseName: "SoqlForge ${{ github.ref_name }}"
+          releaseBody: "See the assets below to download and install. Installed apps update automatically."
+          releaseDraft: false
+          prerelease: false

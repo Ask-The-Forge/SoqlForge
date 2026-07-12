@@ -30,21 +30,22 @@ npm run tauri build
 #   msi/SoqlForge_<ver>_x64.msi
 ```
 
-## Packaging with Advanced Installer (internal distribution + auto-update)
+Or use `scripts/release.ps1`, which builds and stages the installers under
+`dist-release/<version>/`.
 
-See [`DEPLOYMENT.md`](./DEPLOYMENT.md). The short version:
+## Releasing + auto-update
 
-```powershell
-# Build a release + stage artifacts for Advanced Installer to ingest
-pwsh scripts/release.ps1            # or powershell -File scripts/release.ps1
-# Artifacts in dist-release/<version>/
+Releases are built and published by CI: push a `v*` tag and GitHub Actions
+builds the signed installers, generates the updater manifest, and publishes a
+GitHub Release. Installed apps check that release on startup and self-update
+via Tauri's updater plugin — no third-party installer tooling required.
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
-Then in Advanced Installer (Enterprise tier or higher): point its "Files
-and Folders" at the staged `soqlforge.exe`, configure the **Updater** page
-with your internal manifest URL, build the MSI, and upload the MSI +
-generated `updates.xml` to the internal host. Installed apps auto-update
-from then on.
+See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for the one-time signing-key setup and
+the full flow.
 
 ## Keyboard shortcuts
 

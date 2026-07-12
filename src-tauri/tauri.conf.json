@@ -23,9 +23,21 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Ask-The-Forge/SoqlForge/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "Ask the Forge",
     "copyright": "Copyright (c) 2026 Ask the Forge",
     "category": "DeveloperTool",

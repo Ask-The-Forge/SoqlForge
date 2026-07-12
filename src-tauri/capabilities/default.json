@@ -7,6 +7,8 @@
     "core:default",
     "dialog:allow-save",
     "opener:default",
-    "opener:allow-open-path"
+    "opener:allow-open-path",
+    "updater:default",
+    "process:default"
   ]
 }

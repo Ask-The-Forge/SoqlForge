@@ -13,7 +13,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Auto-update is desktop-only. The frontend drives the actual
+            // check/download via the updater JS API; this just wires the plugin.
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             // Load persisted CLI settings (if any) at startup so the user's
             // path override and timeout survive a relaunch.
             commands::settings::load_persisted(app.handle());
