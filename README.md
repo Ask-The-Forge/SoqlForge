@@ -80,6 +80,16 @@ Contributions welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md). CI runs
 
 [MIT](./LICENSE)
 
+## Disclaimer
+
+SoqlForge is provided **free and as-is**, with no warranty of any kind. You're
+welcome to use, modify, and distribute it, but you do so at your own risk. Ask
+the Forge and the project's contributors are **not responsible** for any data
+loss, damage, or other consequences arising from its use — including anything
+that happens to your Salesforce orgs or data. Always verify queries and edits
+against non-production data first. (This restates, in plain English, the
+liability and warranty terms in the [MIT License](./LICENSE).)
+
 ---
 
 **Name history.** Project was originally scaffolded as "SOQLForge", briefly
