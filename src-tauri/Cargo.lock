@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "soqlforge"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "once_cell",
  "regex",
