@@ -1,0 +1,163 @@
+@import "tailwindcss";
+
+@theme {
+  --font-mono:
+    ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+:root {
+  font-family:
+    Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #e6e6e6;
+  background-color: #0e1116;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2f3a;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4150;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Light theme overrides.
+
+   Activated by `html.theme-light` (set from React based on the Zustand store).
+   The component code stays written in the dark palette (zinc-900/950, etc.) —
+   these rules just remap those Tailwind utility classes to light equivalents
+   when the theme class is present. Saves us from prefixing every component
+   with `dark:` variants.
+
+   Specificity = (0,2,0) — beats the (0,1,0) of plain Tailwind utility classes.
+   ───────────────────────────────────────────────────────────────────────── */
+
+html.theme-light {
+  color: #18181b;
+  background-color: #fafafa;
+  color-scheme: light;
+}
+
+html.theme-light ::-webkit-scrollbar-thumb {
+  background: #c8c8d0;
+}
+html.theme-light ::-webkit-scrollbar-thumb:hover {
+  background: #a0a0a8;
+}
+
+/* Surfaces */
+html.theme-light .bg-zinc-950 { background-color: #fafafa !important; }
+html.theme-light .bg-zinc-900 { background-color: #f4f4f5 !important; }
+html.theme-light .bg-zinc-800 { background-color: #e4e4e7 !important; }
+html.theme-light .bg-zinc-900\/40 { background-color: rgba(244, 244, 245, 0.4) !important; }
+html.theme-light .bg-zinc-900\/60 { background-color: rgba(244, 244, 245, 0.6) !important; }
+html.theme-light .bg-zinc-800\/50 { background-color: rgba(228, 228, 231, 0.5) !important; }
+
+/* Odd/even row striping in the grid */
+html.theme-light .odd\:bg-zinc-950:nth-child(odd) {
+  background-color: #ffffff !important;
+}
+html.theme-light .even\:bg-zinc-900\/40:nth-child(even) {
+  background-color: rgba(244, 244, 245, 0.6) !important;
+}
+html.theme-light .hover\:bg-zinc-800\/50:hover {
+  background-color: rgba(228, 228, 231, 0.6) !important;
+}
+html.theme-light .hover\:bg-zinc-900:hover {
+  background-color: #f4f4f5 !important;
+}
+
+/* Borders */
+html.theme-light .border-zinc-700 { border-color: #d4d4d8 !important; }
+html.theme-light .border-zinc-800 { border-color: #e4e4e7 !important; }
+html.theme-light .border-zinc-900 { border-color: #f4f4f5 !important; }
+html.theme-light .hover\:border-zinc-500:hover { border-color: #71717a !important; }
+
+/* Text colors — invert lightness. Pulled darker than a strict invert so the
+   "muted" labels (uppercase section headers, hints, history timestamps) stay
+   readable on white — strict inversion makes them too pale. */
+html.theme-light .text-zinc-100 { color: #09090b !important; }
+html.theme-light .text-zinc-200 { color: #18181b !important; }
+html.theme-light .text-zinc-300 { color: #27272a !important; }
+html.theme-light .text-zinc-400 { color: #3f3f46 !important; }
+html.theme-light .text-zinc-500 { color: #52525b !important; }
+html.theme-light .text-zinc-600 { color: #71717a !important; }
+html.theme-light .text-zinc-700 { color: #71717a !important; }
+html.theme-light .hover\:text-zinc-100:hover { color: #000000 !important; }
+html.theme-light .hover\:text-white:hover { color: #000000 !important; }
+
+/* Accent panels — soften their dark backdrops in light mode */
+html.theme-light .bg-amber-900\/20 { background-color: rgba(254, 243, 199, 0.6) !important; }
+html.theme-light .bg-amber-900\/30 { background-color: rgba(254, 243, 199, 0.8) !important; }
+html.theme-light .border-amber-700\/50 { border-color: rgba(217, 119, 6, 0.4) !important; }
+html.theme-light .border-amber-900\/40 { border-color: rgba(217, 119, 6, 0.4) !important; }
+html.theme-light .text-amber-200 { color: #92400e !important; }
+html.theme-light .text-amber-300 { color: #b45309 !important; }
+html.theme-light .text-amber-400 { color: #b45309 !important; }
+
+html.theme-light .bg-red-950\/40 { background-color: rgba(254, 226, 226, 0.7) !important; }
+html.theme-light .border-red-900\/50 { border-color: rgba(220, 38, 38, 0.4) !important; }
+html.theme-light .text-red-300 { color: #b91c1c !important; }
+html.theme-light .text-red-400 { color: #b91c1c !important; }
+
+/* Modal backdrop a bit lighter so it's visible against a light page */
+html.theme-light .bg-black\/50 { background-color: rgba(0, 0, 0, 0.25) !important; }
+
+/* CodeMirror editor — override its hardcoded dark theme in light mode.
+   Syntax-highlight colors are kept (they're chosen to be visible on either
+   background). */
+html.theme-light .cm-editor {
+  background-color: #ffffff !important;
+  color: #18181b !important;
+}
+html.theme-light .cm-content {
+  color: #18181b !important;
+  caret-color: #2563eb !important;
+}
+html.theme-light .cm-gutters {
+  background-color: #f4f4f5 !important;
+  color: #71717a !important;
+  border: none !important;
+}
+html.theme-light .cm-activeLine {
+  background-color: rgba(59, 130, 246, 0.06) !important;
+}
+html.theme-light .cm-activeLineGutter {
+  background-color: rgba(59, 130, 246, 0.1) !important;
+}
+html.theme-light .cm-selectionBackground,
+html.theme-light ::selection {
+  background-color: rgba(59, 130, 246, 0.25) !important;
+}
+/* Note: SOQL syntax colors stay as-is — they're chosen to be legible on both
+   light and dark backgrounds. Refine via a CodeMirror Compartment reconfigure
+   if light-mode contrast becomes a real complaint. */
+html.theme-light .cm-tooltip {
+  background-color: #ffffff !important;
+  color: #18181b !important;
+  border-color: #d4d4d8 !important;
+}
