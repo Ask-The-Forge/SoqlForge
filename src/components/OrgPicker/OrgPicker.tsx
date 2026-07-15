@@ -36,6 +36,20 @@ export function OrgPicker() {
   const { orgs, loading, error, refresh } = useOrgs();
   const activeOrg = useAppStore((s) => s.activeOrg);
   const setActiveOrg = useAppStore((s) => s.setActiveOrg);
+  const setOrgInstanceUrls = useAppStore((s) => s.setOrgInstanceUrls);
+
+  // Publish alias/username → instance URL into the store so the results grid
+  // can link each row out to Salesforce without another CLI round-trip.
+  useEffect(() => {
+    if (orgs.length === 0) return;
+    const map: Record<string, string> = {};
+    for (const o of orgs) {
+      if (!o.instanceUrl) continue;
+      if (o.alias) map[o.alias] = o.instanceUrl;
+      if (o.username) map[o.username] = o.instanceUrl;
+    }
+    setOrgInstanceUrls(map);
+  }, [orgs, setOrgInstanceUrls]);
 
   // Auto-pick ONLY the org the user marked as default in sf itself
   // (`sf config set target-org`). Never fall back to "first in the list" —

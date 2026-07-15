@@ -6,6 +6,10 @@
  * - Client-side sort (results often fit in memory; sf handles pagination upstream)
  * - Column resize via header drag
  * - CSV export button
+ * - Leading action column: an eye button per row opens the record in
+ *   Salesforce (default browser) via the org's instance URL
+ * - Long text / object cells get an expand button → full-value detail modal,
+ *   since every cell is clipped to one line
  * - Cell renderers: null=empty, bool=☑/☐, 18-char ID=copy icon on hover
  *
  * Important: the heavy `useVirtualizer` + `useReactTable` hooks live in a
@@ -26,7 +30,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   type FieldInfo,
@@ -57,6 +61,45 @@ interface ResultsGridProps {
 type Row = Record<string, unknown>;
 
 const ID_REGEX = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
+
+/** Width (px) of the leading action column that holds the "open record in
+ *  Salesforce" eye button. */
+const ACTION_COL_WIDTH = 34;
+
+/** Strings longer than this get an expand affordance + detail modal, since the
+ *  grid clips every cell to a single line and long text areas are unreadable
+ *  inline. */
+const LONG_TEXT_THRESHOLD = 60;
+
+/** The full text worth surfacing in the detail modal, or null when the value
+ *  is short/simple enough to read inline. Objects (subquery/relationship
+ *  summaries) are always expandable — their one-line summary hides the rest. */
+function expandableText(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.length > LONG_TEXT_THRESHOLD ? value : null;
+  }
+  if (value && typeof value === "object") return csvCell(value);
+  return null;
+}
+
+function EyeIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
 
 function CellValue({ value }: { value: unknown }) {
   if (value === null || value === undefined) return null;
@@ -294,6 +337,31 @@ function RowsGrid({
   const activeOrg = useAppStore((s) => s.activeOrg);
   const activeTabId = useAppStore((s) => s.activeTabId);
   const updateTabRecord = useAppStore((s) => s.updateTabRecord);
+  const orgInstanceUrls = useAppStore((s) => s.orgInstanceUrls);
+
+  // Instance URL of the org that produced these rows — lets each row link out
+  // to the record in Salesforce. Keyed off the result's provenance (falling
+  // back to the active org), so it stays correct even if the user switched the
+  // picker after running. Null when the org list hasn't reported a URL yet.
+  const instanceUrl = useMemo(() => {
+    const org = resultContext?.org ?? activeOrg;
+    const url = org ? orgInstanceUrls[org] : null;
+    return url ? url.replace(/\/+$/, "") : null;
+  }, [orgInstanceUrls, resultContext, activeOrg]);
+
+  // Full-value detail modal for long text / object cells (the grid truncates
+  // every cell to one line). `label` is the column path, `value` the full text.
+  const [detail, setDetail] = useState<{ label: string; value: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!detail) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDetail(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [detail]);
 
   // The edit path is keyed STRICTLY off the result's provenance (org +
   // FROM-object captured when the run completed) — never off the live editor
@@ -454,11 +522,16 @@ function RowsGrid({
       >
         <table
           className="border-separate border-spacing-0 text-xs"
-          style={{ width: totalWidth, tableLayout: "fixed" }}
+          style={{ width: totalWidth + ACTION_COL_WIDTH, tableLayout: "fixed" }}
         >
           <thead className="sticky top-0 z-10 bg-zinc-900">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
+                <th
+                  style={{ width: ACTION_COL_WIDTH }}
+                  className="px-1 py-1.5 border-b border-r border-zinc-700 bg-zinc-900"
+                  aria-label="Open record"
+                />
                 {hg.headers.map((header) => {
                   // Drag-and-drop column reordering. HTML5 DnD keeps the impl
                   // dependency-free; we move the dragged column into the drop
@@ -526,7 +599,7 @@ function RowsGrid({
           <tbody>
             {paddingTop > 0 && (
               <tr>
-                <td colSpan={columns.length} style={{ height: paddingTop }} />
+                <td colSpan={columns.length + 1} style={{ height: paddingTop }} />
               </tr>
             )}
             {virtualRows.map((vr) => {
@@ -536,12 +609,34 @@ function RowsGrid({
               // index into `data` — and is O(1), unlike an indexOf scan that
               // costs O(rows) per visible row per render.
               const originalRowIdx = row.index;
+              const recordId =
+                typeof row.original.Id === "string"
+                  ? (row.original.Id as string)
+                  : null;
               return (
                 <tr
                   key={row.id}
                   className="odd:bg-zinc-950 even:bg-zinc-900/40 hover:bg-zinc-800/50"
                   style={{ height: vr.size }}
                 >
+                  <td
+                    style={{ width: ACTION_COL_WIDTH }}
+                    className="px-1 border-b border-r border-zinc-800 text-center align-middle"
+                  >
+                    {recordId && instanceUrl && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void openUrl(`${instanceUrl}/${recordId}`);
+                        }}
+                        className="text-zinc-600 hover:text-blue-400 transition-colors align-middle"
+                        title="Open record in Salesforce"
+                        aria-label="Open record in Salesforce"
+                      >
+                        <EyeIcon />
+                      </button>
+                    )}
+                  </td>
                   {row.getVisibleCells().map((cell) => {
                     const colId = cell.column.id;
                     const cellKey = `${originalRowIdx}::${colId}`;
@@ -555,17 +650,28 @@ function RowsGrid({
                         ? cellError.msg
                         : null;
                     const field = isEditable(colId, row.original);
+                    const rawValue = cell.getValue();
+                    const expandable = isEditing
+                      ? null
+                      : expandableText(rawValue);
                     return (
                       <td
                         key={cell.id}
                         style={{ width: cell.column.getSize() }}
                         className={
-                          "px-2 py-1 border-b border-r border-zinc-800 truncate " +
+                          "group/cell overflow-hidden px-2 py-1 border-b border-r border-zinc-800 " +
                           (isSaving ? "opacity-60 " : "") +
                           (errHere ? "bg-red-950/40 " : "") +
                           (field ? "cursor-cell" : "")
                         }
-                        title={errHere ?? (field ? "Double-click to edit" : undefined)}
+                        title={
+                          errHere ??
+                          (field
+                            ? "Double-click to edit"
+                            : typeof rawValue === "string"
+                              ? rawValue
+                              : undefined)
+                        }
                         onDoubleClick={(e) => {
                           if (!field) return;
                           e.preventDefault();
@@ -583,10 +689,27 @@ function RowsGrid({
                             onCancel={() => setEditing(null)}
                           />
                         ) : (
-                          flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext(),
-                          )
+                          <div className="flex items-center gap-1 min-w-0">
+                            <div className="truncate min-w-0">
+                              {flexRender(
+                                cell.column.columnDef.cell,
+                                cell.getContext(),
+                              )}
+                            </div>
+                            {expandable !== null && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDetail({ label: colId, value: expandable });
+                                }}
+                                className="shrink-0 text-zinc-500 hover:text-blue-400 opacity-0 group-hover/cell:opacity-100 transition-opacity"
+                                title="View full value"
+                                aria-label="View full value"
+                              >
+                                ⤢
+                              </button>
+                            )}
+                          </div>
                         )}
                       </td>
                     );
@@ -596,12 +719,57 @@ function RowsGrid({
             })}
             {paddingBottom > 0 && (
               <tr>
-                <td colSpan={columns.length} style={{ height: paddingBottom }} />
+                <td
+                  colSpan={columns.length + 1}
+                  style={{ height: paddingBottom }}
+                />
               </tr>
             )}
           </tbody>
         </table>
       </div>
+
+      {detail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
+          onClick={() => setDetail(null)}
+        >
+          <div
+            className="flex flex-col w-full max-w-3xl max-h-[80vh] bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800">
+              <span
+                className="text-sm font-medium text-zinc-200 truncate"
+                title={detail.label}
+              >
+                {detail.label}
+              </span>
+              <span className="text-xs text-zinc-500 shrink-0">
+                {detail.value.length.toLocaleString()} chars
+              </span>
+              <button
+                onClick={() => void navigator.clipboard.writeText(detail.value)}
+                className="ml-auto shrink-0 text-xs text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-2 py-0.5"
+                title="Copy value to clipboard"
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => setDetail(null)}
+                className="shrink-0 text-zinc-400 hover:text-white text-lg leading-none"
+                title="Close (Esc)"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-4 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words">
+              {detail.value}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

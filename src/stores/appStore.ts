@@ -88,6 +88,13 @@ interface AppState {
   orgsVersion: number;
   bumpOrgsVersion: () => void;
 
+  /** alias (and username) → Lightning instance URL, synced from the org list
+   *  by the OrgPicker. Lets the results grid build "open record in Salesforce"
+   *  links without spawning another `sf org list`. Not persisted — cheap to
+   *  re-derive once the org list loads, and results never survive a relaunch. */
+  orgInstanceUrls: Record<string, string>;
+  setOrgInstanceUrls: (map: Record<string, string>) => void;
+
   history: HistoryEntry[];
   pushHistory: (entry: HistoryEntry) => void;
   clearHistory: () => void;
@@ -155,6 +162,9 @@ export const useAppStore = create<AppState>()(
 
       orgsVersion: 0,
       bumpOrgsVersion: () => set((s) => ({ orgsVersion: s.orgsVersion + 1 })),
+
+      orgInstanceUrls: {},
+      setOrgInstanceUrls: (orgInstanceUrls) => set({ orgInstanceUrls }),
 
       history: [],
       pushHistory: (entry) =>
