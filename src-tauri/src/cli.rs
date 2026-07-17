@@ -319,7 +319,7 @@ pub async fn run_sf_json_cancellable(
             serde_json::from_str(last).map_err(|e| {
                 AppError::ParseError(format!(
                     "{e}; first 200 chars of output: {}",
-                    &payload.chars().take(200).collect::<String>()
+                    payload.chars().take(200).collect::<String>()
                 ))
             })?
         }
