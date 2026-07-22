@@ -63,6 +63,9 @@ pub struct FieldInfo {
     /// calculated fields, locked-down system fields, etc.). Comes from
     /// `updateable` in the describe.
     pub updateable: bool,
+    /// True for formula (and roll-up summary) fields — lets the UI explain
+    /// WHY a field is read-only instead of silently refusing to edit.
+    pub calculated: bool,
     /// For picklist / multipicklist fields, the available values. Empty for
     /// other field types.
     pub picklist_values: Vec<PicklistValue>,
@@ -154,6 +157,10 @@ pub async fn describe_object(
             .get("updateable")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let calculated = f
+            .get("calculated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let picklist_values = f
             .get("picklistValues")
             .and_then(Value::as_array)
@@ -196,6 +203,7 @@ pub async fn describe_object(
             reference_to,
             relationship_name,
             updateable,
+            calculated,
             picklist_values,
         });
     }

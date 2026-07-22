@@ -8,6 +8,11 @@
  * - CSV export button
  * - Leading action column: an eye button per row opens the record in
  *   Salesforce (default browser) via the org's instance URL
+ * - Column headers show the field's type (from the describe cache), with a
+ *   ⨍ marker for formula fields; double-clicking a read-only cell surfaces
+ *   WHY it can't be edited in a transient toolbar notice
+ * - "Object Setup" toolbar button opens the FROM-object's Fields &
+ *   Relationships page in Salesforce Setup
  * - Long text / object cells get an expand button → full-value detail modal,
  *   since every cell is clipped to one line
  * - Cell renderers: null=empty, bool=☑/☐, 18-char ID=copy icon on hover
@@ -40,7 +45,11 @@ import {
   updateRecord,
 } from "../../lib/tauriClient";
 import { useAppStore, type ResultContext } from "../../stores/appStore";
-import { getCachedFields, loadFields } from "../../lib/schemaCache";
+import {
+  getCachedFields,
+  loadFields,
+  resolveRelationshipPath,
+} from "../../lib/schemaCache";
 import { buildCsv, csvCell, flattenValue } from "./csv";
 import { discoverColumns } from "./columnDiscovery";
 import { parseSelectFields } from "./selectFields";
@@ -80,6 +89,17 @@ function expandableText(value: unknown): string | null {
   }
   if (value && typeof value === "object") return csvCell(value);
   return null;
+}
+
+/** Human-friendly one-liner for a column header's field type. Formula fields
+ *  get a ⨍ prefix, lookups show their target object(s). */
+function fieldTypeLabel(f: FieldInfo): string {
+  let base = f.fieldType;
+  if (f.fieldType === "reference" && f.referenceTo.length) {
+    const targets = f.referenceTo.slice(0, 2).join(", ");
+    base = `lookup(${targets}${f.referenceTo.length > 2 ? ", …" : ""})`;
+  }
+  return f.calculated ? `⨍ ${base}` : base;
 }
 
 function EyeIcon() {
@@ -321,6 +341,14 @@ function RowsGrid({
     colId: string;
   } | null>(null);
   const [savingCell, setSavingCell] = useState<string | null>(null);
+  // Transient toolbar notice explaining why a double-clicked cell won't edit
+  // (formula field, wrong org, Tooling API result, …).
+  const [editNotice, setEditNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!editNotice) return;
+    const t = setTimeout(() => setEditNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [editNotice]);
   const [cellError, setCellError] = useState<{
     rowIdx: number;
     colId: string;
@@ -332,6 +360,7 @@ function RowsGrid({
   useEffect(() => {
     setEditing(null);
     setCellError(null);
+    setEditNotice(null);
   }, [result]);
 
   const activeOrg = useAppStore((s) => s.activeOrg);
@@ -363,29 +392,33 @@ function RowsGrid({
     return () => window.removeEventListener("keydown", onKey);
   }, [detail]);
 
+  // Org + FROM-object that produced these rows — drives field metadata
+  // (column-header types) and the Object Setup link. Tooling API results are
+  // excluded: the standard describe doesn't cover those objects.
+  const metaOrg =
+    resultContext && !resultContext.useToolingApi ? resultContext.org : null;
+  const metaObject = metaOrg ? resultContext?.objectName ?? null : null;
+
   // The edit path is keyed STRICTLY off the result's provenance (org +
   // FROM-object captured when the run completed) — never off the live editor
-  // text, which the user may have rewritten since. Editing is also disabled
-  // for Tooling API results (sf data update record hits the standard API)
-  // and when the active org no longer matches the result's org.
-  const editOrg =
-    resultContext && resultContext.org === activeOrg && !resultContext.useToolingApi
-      ? resultContext.org
-      : null;
-  const editObject = editOrg ? resultContext?.objectName ?? null : null;
+  // text, which the user may have rewritten since. Editing additionally
+  // requires the active org to still match the result's org (sf data update
+  // record hits whatever org is targeted).
+  const editOrg = metaOrg && metaOrg === activeOrg ? metaOrg : null;
+  const editObject = editOrg ? metaObject : null;
 
   // Field-info lookup for the result's FROM-object, from the describe cache.
   // If the describe isn't cached yet, kick off a load and re-render when it
   // lands so cells become editable without re-running the query.
   // `fieldsVersion` MUST be a dep — it's what invalidates the memo once the
-  // async describe arrives (editOrg/editObject won't have changed by then).
+  // async describe arrives (metaOrg/metaObject won't have changed by then).
   const [fieldsVersion, setFieldsVersion] = useState(0);
-  const editableFields = useMemo(() => {
+  const fieldInfo = useMemo(() => {
     const map = new Map<string, FieldInfo>();
-    if (!editOrg || !editObject) return map;
-    const fields = getCachedFields(editOrg, editObject);
+    if (!metaOrg || !metaObject) return map;
+    const fields = getCachedFields(metaOrg, metaObject);
     if (!fields) {
-      void loadFields(editOrg, editObject).then((loaded) => {
+      void loadFields(metaOrg, metaObject).then((loaded) => {
         if (loaded.length) setFieldsVersion((v) => v + 1);
       });
       return map;
@@ -394,17 +427,70 @@ function RowsGrid({
       map.set(f.name.toLowerCase(), f);
     }
     return map;
-  }, [editOrg, editObject, fieldsVersion]);
+  }, [metaOrg, metaObject, fieldsVersion]);
+
+  // Per-column field metadata, including dot columns (Account.Name) resolved
+  // through the describe cache. Dot paths resolve only from what's already
+  // cached — we don't fan out extra describes just for header labels; the
+  // editor's autocomplete usually pre-loaded them anyway.
+  const columnFieldInfo = useMemo(() => {
+    const map = new Map<string, FieldInfo>();
+    if (!metaOrg || !metaObject) return map;
+    for (const path of columnPaths) {
+      const parts = path.split(".");
+      if (parts.length === 1) {
+        const f = fieldInfo.get(path.toLowerCase());
+        if (f) map.set(path, f);
+        continue;
+      }
+      const target = resolveRelationshipPath(
+        metaOrg,
+        metaObject,
+        parts.slice(0, -1),
+      );
+      if (!target) continue;
+      const leaf = parts[parts.length - 1].toLowerCase();
+      const f = getCachedFields(metaOrg, target)?.find(
+        (x) => x.name.toLowerCase() === leaf,
+      );
+      if (f) map.set(path, f);
+    }
+    return map;
+  }, [columnPaths, fieldInfo, metaOrg, metaObject]);
 
   /** Can this (col, row) be inline-edited? */
   function isEditable(colId: string, row: Row): FieldInfo | null {
     if (!editOrg || !editObject) return null;
     if (colId.includes(".")) return null; // relationship path — not editable here
     if (colId === "Id") return null;
-    const field = editableFields.get(colId.toLowerCase());
+    const field = fieldInfo.get(colId.toLowerCase());
     if (!field || !field.updateable) return null;
     if (!row.Id || typeof row.Id !== "string") return null;
     return field;
+  }
+
+  /** Why can't this cell be edited? Surfaced when the user double-clicks a
+   *  non-editable cell — silently doing nothing (the old behavior) read as
+   *  a bug, especially on formula fields. Null = no explanation available. */
+  function readOnlyReason(colId: string, row: Row): string | null {
+    if (!resultContext) return null;
+    if (resultContext.useToolingApi)
+      return "Tooling API results are read-only.";
+    if (resultContext.org !== activeOrg)
+      return `This result came from org "${resultContext.org}" — switch back to that org to edit.`;
+    if (!editObject) return null;
+    if (colId.includes("."))
+      return "Relationship fields can't be edited here — query the related object directly.";
+    if (colId === "Id") return "Record Ids can't be edited.";
+    const field = fieldInfo.get(colId.toLowerCase());
+    if (!field) return null;
+    if (field.calculated)
+      return `${field.name} is a formula field — its value is calculated by Salesforce and can't be edited.`;
+    if (!field.updateable)
+      return `${field.name} is read-only (not updateable via the API).`;
+    if (!row.Id || typeof row.Id !== "string")
+      return "This row has no Id — include Id in your SELECT to enable editing.";
+    return null;
   }
 
   async function commitEdit(rowIdx: number, colId: string, next: CommitValue) {
@@ -479,40 +565,63 @@ function RowsGrid({
         </span>
         <span className="text-zinc-600">·</span>
         <span>{columnPaths.length} columns</span>
-        {exportSaved && (
-          <div className="ml-auto flex items-center gap-2 min-w-0">
+        <div className="ml-auto flex items-center gap-2 min-w-0">
+          {editNotice && (
             <span
-              className="text-emerald-400 truncate max-w-[40ch]"
-              title={exportSaved}
+              className="text-amber-400 truncate max-w-[60ch]"
+              title={editNotice}
             >
-              Saved → {exportSaved}
+              {editNotice}
             </span>
-            <button
-              onClick={() => {
-                if (exportSaved) void openPath(exportSaved);
-              }}
-              className="text-emerald-300 hover:text-emerald-100 border border-emerald-800 hover:border-emerald-600 rounded px-2 py-0.5 whitespace-nowrap"
-              title="Open the saved file in the OS default app"
+          )}
+          {exportSaved && (
+            <>
+              <span
+                className="text-emerald-400 truncate max-w-[40ch]"
+                title={exportSaved}
+              >
+                Saved → {exportSaved}
+              </span>
+              <button
+                onClick={() => {
+                  if (exportSaved) void openPath(exportSaved);
+                }}
+                className="text-emerald-300 hover:text-emerald-100 border border-emerald-800 hover:border-emerald-600 rounded px-2 py-0.5 whitespace-nowrap"
+                title="Open the saved file in the OS default app"
+              >
+                Open
+              </button>
+            </>
+          )}
+          {exportError && (
+            <span
+              className="text-red-400 truncate max-w-[40ch]"
+              title={exportError}
             >
-              Open
+              Export failed: {exportError}
+            </span>
+          )}
+          {metaObject && instanceUrl && (
+            <button
+              onClick={() =>
+                void openUrl(
+                  `${instanceUrl}/lightning/setup/ObjectManager/${metaObject}/FieldsAndRelationships/view`,
+                )
+              }
+              className="text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-2 py-0.5 whitespace-nowrap"
+              title={`Open ${metaObject} → Fields & Relationships in Salesforce Setup`}
+            >
+              Object Setup ↗
             </button>
-          </div>
-        )}
-        {exportError && (
-          <span className="ml-auto text-red-400 truncate max-w-[40ch]" title={exportError}>
-            Export failed: {exportError}
-          </span>
-        )}
-        <button
-          onClick={() => void handleExport()}
-          className={
-            (exportSaved || exportError ? "" : "ml-auto ") +
-            "text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-2 py-0.5"
-          }
-          title="Export to CSV"
-        >
-          Export CSV
-        </button>
+          )}
+          <button
+            onClick={() => void handleExport()}
+            className="text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-2 py-0.5 whitespace-nowrap"
+            title="Export to CSV"
+          >
+            Export CSV
+          </button>
+        </div>
       </div>
 
       <div
@@ -537,6 +646,15 @@ function RowsGrid({
                   // dependency-free; we move the dragged column into the drop
                   // target's slot in the columnOrder state on `drop`.
                   const colId = header.column.id;
+                  const finfo = columnFieldInfo.get(colId) ?? null;
+                  const typeText = finfo ? fieldTypeLabel(finfo) : null;
+                  const readOnlySuffix = finfo
+                    ? finfo.calculated
+                      ? " · formula (read-only)"
+                      : !finfo.updateable
+                        ? " · read-only"
+                        : ""
+                    : "";
                   return (
                     <th
                       key={header.id}
@@ -567,7 +685,7 @@ function RowsGrid({
                           return order;
                         });
                       }}
-                      title={`${colId} (drag to reorder)`}
+                      title={`${colId}${typeText ? ` — ${typeText}` : ""}${readOnlySuffix} (drag to reorder)`}
                     >
                       <div
                         onClick={header.column.getToggleSortingHandler()}
@@ -585,6 +703,18 @@ function RowsGrid({
                               : ""}
                         </span>
                       </div>
+                      {typeText && (
+                        <div
+                          className={
+                            "text-[10px] font-normal leading-tight truncate " +
+                            (finfo?.calculated
+                              ? "text-amber-500/80"
+                              : "text-zinc-500")
+                          }
+                        >
+                          {typeText}
+                        </div>
+                      )}
                       <div
                         onMouseDown={header.getResizeHandler()}
                         onTouchStart={header.getResizeHandler()}
@@ -673,7 +803,11 @@ function RowsGrid({
                               : undefined)
                         }
                         onDoubleClick={(e) => {
-                          if (!field) return;
+                          if (!field) {
+                            const reason = readOnlyReason(colId, row.original);
+                            if (reason) setEditNotice(reason);
+                            return;
+                          }
                           e.preventDefault();
                           setCellError(null);
                           setEditing({ rowIdx: originalRowIdx, colId });

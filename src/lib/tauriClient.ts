@@ -162,6 +162,9 @@ export const FieldInfoSchema = z.object({
   referenceTo: z.array(z.string()),
   relationshipName: z.string().nullable().optional(),
   updateable: z.boolean(),
+  /** Formula / roll-up summary fields — read-only by definition. Optional so
+   *  cached describes from older builds still parse. */
+  calculated: z.boolean().optional(),
   picklistValues: z.array(PicklistValueSchema),
 });
 export type FieldInfo = z.infer<typeof FieldInfoSchema>;
