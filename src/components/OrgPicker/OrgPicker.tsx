@@ -12,6 +12,7 @@ import { useOrgs } from "../../hooks/useOrgs";
 import { useAppStore } from "../../stores/appStore";
 import type { OrgEntry } from "../../lib/tauriClient";
 import { StatusDot } from "../shared/StatusDot";
+import { Spinner } from "../shared/Spinner";
 
 function CliNotFoundBanner() {
   return (
@@ -75,9 +76,10 @@ export function OrgPicker() {
         <button
           onClick={() => void refresh()}
           disabled={loading}
-          className="ml-auto text-xs text-zinc-400 hover:text-zinc-100 disabled:opacity-50"
+          className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 disabled:opacity-50"
           title="Refresh org list"
         >
+          {loading && <Spinner />}
           {loading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
@@ -107,7 +109,12 @@ export function OrgPicker() {
           className="flex-1 min-w-0 bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm text-zinc-100 focus:outline-none focus:border-blue-500 truncate"
         >
           {orgs.length === 0 ? (
-            <option value="">No authenticated orgs</option>
+            // `sf org list` is a slow CLI round-trip on a cold start —
+            // "No authenticated orgs" while it's still running reads as a
+            // failure the user has to act on.
+            <option value="">
+              {loading ? "Loading orgs…" : "No authenticated orgs"}
+            </option>
           ) : (
             <>
               {!activeOrg && <option value="">— select an org —</option>}

@@ -6,6 +6,10 @@
  *   2. Generates `SELECT a, b, c FROM Object LIMIT 200` with EVERY field
  *   3. Hands the SOQL back via onPick — caller replaces editor content.
  *
+ * Both round-trips (the object catalog, then the describe) show explicit
+ * loading state — on a cold cache the describe takes seconds, and the popover
+ * stays open the whole time, so silence read as a hang.
+ *
  * Custom relationship reference fields like `AccountId` are included; the
  * relationship-only names (`Account`) are not, because the describe only
  * emits scalar field entries (relationships are surfaced via the FK + a
@@ -22,10 +26,14 @@ import {
   loadObjectsFor,
 } from "../../lib/schemaCache";
 import type { ObjectInfo } from "../../lib/tauriClient";
+import { Spinner } from "../shared/Spinner";
 
 interface ObjectPickerProps {
   /** Disabled when there's no active org. */
   disabled?: boolean;
+  /** FROM-object currently in the editor. Shown on the button so the control
+   *  reads as "this is what the query is pointed at", not just an action. */
+  currentObject?: string | null;
   /** Called with the generated SOQL when the user picks an object. */
   onPick: (soql: string) => void;
 }
@@ -33,7 +41,11 @@ interface ObjectPickerProps {
 const MAX_ROWS = 200;
 const DEFAULT_LIMIT = 200;
 
-export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
+export function ObjectPicker({
+  disabled,
+  currentObject,
+  onPick,
+}: ObjectPickerProps) {
   const activeOrg = useAppStore((s) => s.activeOrg);
 
   const [open, setOpen] = useState(false);
@@ -43,6 +55,7 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
   // Loading vs failed matters: `loadObjectsFor` returns [] on BOTH "still
   // loading never happens (it awaits)" and "sf sobject list failed" — without
   // tracking it here the popover showed a perpetual "Loading…" on failure.
+  const [objectsLoading, setObjectsLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
 
@@ -50,15 +63,27 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Fetch object catalog when we open (idempotent; cached after first call).
+  // The `cancelled` guard keeps a slow load for a previous org from landing
+  // on top of the list for the one the user switched to.
   useEffect(() => {
     if (!open || !activeOrg) return;
+    let cancelled = false;
     setLoadFailed(false);
-    void loadObjectsFor(activeOrg).then((objs) => {
-      setObjects(objs);
-      // An org genuinely has hundreds of objects; an empty list means the
-      // listObjects call failed (errors are swallowed into [] by the cache).
-      setLoadFailed(objs.length === 0);
-    });
+    setObjectsLoading(true);
+    void loadObjectsFor(activeOrg)
+      .then((objs) => {
+        if (cancelled) return;
+        setObjects(objs);
+        // An org genuinely has hundreds of objects; an empty list means the
+        // listObjects call failed (errors are swallowed into [] by the cache).
+        setLoadFailed(objs.length === 0);
+      })
+      .finally(() => {
+        if (!cancelled) setObjectsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open, activeOrg, retryNonce]);
 
   // Focus the filter input when the popover opens.
@@ -103,6 +128,7 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
 
   async function buildAndPick(objectName: string) {
     if (!activeOrg) return;
+    if (busyFor) return; // a describe is already in flight — ignore double-picks
     setBusyFor(objectName);
     try {
       let fields = getCachedFields(activeOrg, objectName);
@@ -129,18 +155,37 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
         onClick={() => setOpen((v) => !v)}
         disabled={disabled || !activeOrg}
         className={
-          "text-xs border rounded px-2 py-0.5 transition-colors " +
+          "flex items-center gap-1.5 text-xs border rounded px-2 py-1 transition-colors " +
           (open
             ? "bg-blue-600 border-blue-500 text-white"
-            : "text-zinc-300 border-zinc-700 hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed")
+            : "bg-zinc-800 text-zinc-100 border-zinc-600 hover:bg-zinc-700 hover:border-zinc-500 disabled:opacity-50 disabled:cursor-not-allowed")
         }
         title={
           activeOrg
-            ? "Pick an object — generates SELECT with all its fields"
+            ? "Pick an object — builds a SELECT with all of its fields"
             : "Select an org first"
         }
       >
-        From…
+        {busyFor ? (
+          <Spinner className="text-blue-300" />
+        ) : (
+          <span aria-hidden="true">▤</span>
+        )}
+        <span className="font-medium">Select Object</span>
+        {currentObject && (
+          <span
+            className={
+              "font-mono max-w-[14ch] truncate " +
+              (open ? "text-blue-100" : "text-zinc-400")
+            }
+            title={`Current FROM object: ${currentObject}`}
+          >
+            · {currentObject}
+          </span>
+        )}
+        <span className="text-[10px] opacity-70" aria-hidden="true">
+          ▾
+        </span>
       </button>
 
       {open && (
@@ -151,7 +196,7 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder={
-              objects.length === 0
+              objectsLoading && objects.length === 0
                 ? "Loading objects…"
                 : `Filter ${objects.length} objects…`
             }
@@ -183,8 +228,15 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
                 </button>
               </div>
             ) : filtered.length === 0 ? (
-              <div className="px-2 py-3 text-xs text-zinc-500">
-                {objects.length === 0 ? "Loading…" : "No matches"}
+              <div className="px-2 py-3 text-xs text-zinc-500 flex items-center gap-2">
+                {objects.length === 0 ? (
+                  <>
+                    <Spinner className="text-zinc-400" />
+                    Loading objects…
+                  </>
+                ) : (
+                  "No matches"
+                )}
               </div>
             ) : (
               filtered.map((o) => (
@@ -192,7 +244,8 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
                   key={o.name}
                   type="button"
                   onClick={() => void buildAndPick(o.name)}
-                  className="w-full text-left px-2 py-1 text-xs text-zinc-200 hover:bg-blue-600/30 flex items-center justify-between gap-2"
+                  disabled={!!busyFor}
+                  className="w-full text-left px-2 py-1 text-xs text-zinc-200 hover:bg-blue-600/30 disabled:hover:bg-transparent flex items-center justify-between gap-2"
                 >
                   <span className="font-mono truncate">{o.name}</span>
                   <span className="flex items-center gap-1 shrink-0">
@@ -202,7 +255,7 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
                       </span>
                     )}
                     {busyFor === o.name && (
-                      <span className="text-[10px] text-zinc-500">…</span>
+                      <Spinner className="text-blue-400" />
                     )}
                   </span>
                 </button>
@@ -212,6 +265,19 @@ export function ObjectPicker({ disabled, onPick }: ObjectPickerProps) {
           {filter && filtered.length === MAX_ROWS && (
             <div className="px-2 py-1 text-[10px] text-zinc-500 border-t border-zinc-800">
               Showing first {MAX_ROWS} — refine the filter to see more.
+            </div>
+          )}
+
+          {/* Describing an object takes a CLI round-trip (seconds on a cold
+              cache, and the popover stays open the whole time) — cover the
+              list so it's obvious the app is working, not stuck. */}
+          {busyFor && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-zinc-900/90 rounded">
+              <Spinner size={20} className="text-blue-400" label="Loading" />
+              <div className="text-xs text-zinc-200 font-mono">{busyFor}</div>
+              <div className="text-[10px] text-zinc-500">
+                Loading fields, building SELECT…
+              </div>
             </div>
           )}
         </div>

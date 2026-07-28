@@ -20,6 +20,7 @@ import { tags as t } from "@lezer/highlight";
 import { useAppStore } from "../../stores/appStore";
 import { type UseQueryResult } from "../../hooks/useQuery";
 import { useEditorSchema } from "../../hooks/useEditorSchema";
+import { extractFromObject } from "../../lib/schemaCache";
 import { soqlLanguage } from "./soqlLanguage";
 import {
   ghostPrediction,
@@ -128,6 +129,10 @@ export function QueryEditor({ query, onOpenSettings }: QueryEditorProps) {
 
   // Keep the schema cache in sync with the FROM-object in the editor.
   useEditorSchema(query.text, activeOrg);
+
+  // Surfaced on the object picker so the button shows what the query is
+  // currently pointed at.
+  const fromObject = useMemo(() => extractFromObject(query.text), [query.text]);
 
   // Keep refs to the latest props so the keymap captured at mount always sees
   // fresh state without rebuilding the editor.
@@ -299,6 +304,7 @@ export function QueryEditor({ query, onOpenSettings }: QueryEditorProps) {
         )}
 
         <ObjectPicker
+          currentObject={fromObject}
           onPick={(soql) => {
             query.setText(soql);
             const view = viewRef.current;

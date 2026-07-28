@@ -123,6 +123,9 @@ interface AppState {
     fieldName: string,
     value: unknown,
   ) => void;
+  /** Drop a record from the active tab's result after it was deleted in the
+   *  org — keeps the grid honest without forcing a re-run. */
+  deleteTabRecord: (tabId: string, rowIdx: number) => void;
 
   theme: "dark" | "light";
   setTheme: (t: "dark" | "light") => void;
@@ -246,6 +249,24 @@ export const useAppStore = create<AppState>()(
             if (rowIdx < 0 || rowIdx >= records.length) return t;
             records[rowIdx] = { ...records[rowIdx], [fieldName]: value };
             return { ...t, result: { ...t.result, records } };
+          }),
+        })),
+      deleteTabRecord: (tabId, rowIdx) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            if (t.id !== tabId || !t.result) return t;
+            if (rowIdx < 0 || rowIdx >= t.result.records.length) return t;
+            const records = t.result.records.filter((_, i) => i !== rowIdx);
+            return {
+              ...t,
+              result: {
+                ...t.result,
+                records,
+                // totalSize can exceed records.length (server-side paging), so
+                // decrement it rather than resetting it to the array length.
+                totalSize: Math.max(records.length, t.result.totalSize - 1),
+              },
+            };
           }),
         })),
 
