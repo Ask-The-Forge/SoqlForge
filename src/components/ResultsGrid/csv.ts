@@ -44,8 +44,9 @@ function stripAttributes(v: unknown): unknown {
 }
 
 /** Pick the "most useful display value" out of a SObject record for inlining
- *  into a summary. Tries Name, then any field that looks name-ish. */
-function pickDisplayValue(rec: Record<string, unknown>): string {
+ *  into a summary. Tries Name, then any field that looks name-ish. Exported so
+ *  the delete confirmation can name the record it's about to destroy. */
+export function pickDisplayValue(rec: Record<string, unknown>): string {
   for (const key of ["Name", "Subject", "Title", "CaseNumber", "Id"]) {
     const v = rec[key];
     if (typeof v === "string" && v.trim()) return v;
@@ -146,4 +147,30 @@ export function buildCsv(
   // Prepend UTF-8 BOM + Excel-friendly newlines so the file opens cleanly in
   // Excel/Numbers/Sheets without encoding fuss.
   return "﻿" + lines.join("\r\n");
+}
+
+/**
+ * Tab-separated rendering of the same table, for the clipboard — pastes
+ * straight into Excel / Sheets / a Slack message.
+ *
+ * TSV has no quoting convention the various consumers agree on, so embedded
+ * tabs and newlines are flattened to a single space instead of escaped: a
+ * mangled cell beats a row that silently splits into three.
+ */
+export function buildTsv(
+  records: Record<string, unknown>[],
+  columns: string[],
+  headerLabels?: Map<string, string>,
+): string {
+  const flat = (s: string) => s.replace(/[\t\r\n]+/g, " ");
+  const lines: string[] = [];
+  lines.push(columns.map((c) => flat(headerLabels?.get(c) ?? c)).join("\t"));
+  for (const rec of records) {
+    lines.push(
+      columns
+        .map((col) => flat(guardFormula(csvCell(flattenValue(rec, col)))))
+        .join("\t"),
+    );
+  }
+  return lines.join("\r\n");
 }

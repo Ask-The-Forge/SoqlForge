@@ -358,3 +358,31 @@ export async function updateRecord(
   const raw = await invoke("update_record", { args });
   return UpdateRecordResultSchema.parse(raw);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Record delete
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const DeleteRecordResultSchema = z.object({
+  id: z.string(),
+  success: z.boolean(),
+});
+export type DeleteRecordResult = z.infer<typeof DeleteRecordResultSchema>;
+
+export interface DeleteRecordArgs {
+  orgAlias: string;
+  objectName: string;
+  recordId: string;
+  /** Delete from a Tooling API object — must match how the row was queried. */
+  useToolingApi?: boolean;
+}
+
+/** Destructive: deletes the record in the org. Callers MUST confirm first. */
+export async function deleteRecord(
+  args: DeleteRecordArgs,
+): Promise<DeleteRecordResult> {
+  const raw = await invoke("delete_record", {
+    args: { ...args, useToolingApi: !!args.useToolingApi },
+  });
+  return DeleteRecordResultSchema.parse(raw);
+}

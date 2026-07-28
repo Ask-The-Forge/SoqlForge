@@ -5,9 +5,11 @@
  * - Columns discovered from records (incl. dot-notation for relationships)
  * - Client-side sort (results often fit in memory; sf handles pagination upstream)
  * - Column resize via header drag
- * - CSV export button
+ * - CSV export + "Copy Table" (TSV to the clipboard) buttons. Both emit the
+ *   table as displayed — current sort and column order included
  * - Leading action column: an eye button per row opens the record in
- *   Salesforce (default browser) via the org's instance URL
+ *   Salesforce (default browser) via the org's instance URL; a trash button
+ *   deletes it after an explicit confirmation dialog
  * - Column headers show the field's type (from the describe cache), with a
  *   ⨍ marker for formula fields; double-clicking a read-only cell surfaces
  *   WHY it can't be edited in a transient toolbar notice
@@ -38,6 +40,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 import {
+  deleteRecord,
   type FieldInfo,
   type QueryResult,
   saveCsv,
@@ -50,10 +53,11 @@ import {
   loadFields,
   resolveRelationshipPath,
 } from "../../lib/schemaCache";
-import { buildCsv, csvCell, flattenValue } from "./csv";
+import { buildCsv, buildTsv, csvCell, flattenValue, pickDisplayValue } from "./csv";
 import { discoverColumns } from "./columnDiscovery";
 import { parseSelectFields } from "./selectFields";
 import { CellEditor, type CommitValue } from "./CellEditor";
+import { Spinner } from "../shared/Spinner";
 
 interface ResultsGridProps {
   result: QueryResult | null;
@@ -72,8 +76,10 @@ type Row = Record<string, unknown>;
 const ID_REGEX = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
 
 /** Width (px) of the leading action column that holds the "open record in
- *  Salesforce" eye button. */
+ *  Salesforce" eye button — and, when the result is deletable, the trash
+ *  button next to it. */
 const ACTION_COL_WIDTH = 34;
+const ACTION_COL_WIDTH_WITH_DELETE = 58;
 
 /** Strings longer than this get an expand affordance + detail modal, since the
  *  grid clips every cell to a single line and long text areas are unreadable
@@ -117,6 +123,26 @@ function EyeIcon() {
     >
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
     </svg>
   );
 }
@@ -328,8 +354,17 @@ function RowsGrid({
     overscan: 12,
   });
 
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [exportSaved, setExportSaved] = useState<string | null>(null);
+  // Transient "it worked" toolbar note for copy/delete. Deliberately NOT reset
+  // by the new-result effect below — a delete replaces the result object, and
+  // the confirmation of that delete has to outlive it.
+  const [flash, setFlash] = useState<string | null>(null);
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 5000);
+    return () => clearTimeout(t);
+  }, [flash]);
 
   // ── Inline cell editing ────────────────────────────────────────────────
   // Drives the per-cell CellEditor swap. `rowIdx` is the index into the
@@ -366,6 +401,7 @@ function RowsGrid({
   const activeOrg = useAppStore((s) => s.activeOrg);
   const activeTabId = useAppStore((s) => s.activeTabId);
   const updateTabRecord = useAppStore((s) => s.updateTabRecord);
+  const deleteTabRecord = useAppStore((s) => s.deleteTabRecord);
   const orgInstanceUrls = useAppStore((s) => s.orgInstanceUrls);
 
   // Instance URL of the org that produced these rows — lets each row link out
@@ -408,26 +444,41 @@ function RowsGrid({
   const editObject = editOrg ? metaObject : null;
 
   // Field-info lookup for the result's FROM-object, from the describe cache.
-  // If the describe isn't cached yet, kick off a load and re-render when it
-  // lands so cells become editable without re-running the query.
   // `fieldsVersion` MUST be a dep — it's what invalidates the memo once the
   // async describe arrives (metaOrg/metaObject won't have changed by then).
   const [fieldsVersion, setFieldsVersion] = useState(0);
+  const [fieldsLoading, setFieldsLoading] = useState(false);
   const fieldInfo = useMemo(() => {
     const map = new Map<string, FieldInfo>();
     if (!metaOrg || !metaObject) return map;
     const fields = getCachedFields(metaOrg, metaObject);
-    if (!fields) {
-      void loadFields(metaOrg, metaObject).then((loaded) => {
-        if (loaded.length) setFieldsVersion((v) => v + 1);
-      });
-      return map;
-    }
+    if (!fields) return map;
     for (const f of fields) {
       map.set(f.name.toLowerCase(), f);
     }
     return map;
   }, [metaOrg, metaObject, fieldsVersion]);
+
+  // Cold describe cache: fetch in the background and re-render when it lands,
+  // so column types appear and cells become editable without re-running the
+  // query. Surfaced in the toolbar because the wait is a visible CLI
+  // round-trip — until it resolves the grid looks type-less for no reason.
+  useEffect(() => {
+    if (!metaOrg || !metaObject) return;
+    if (getCachedFields(metaOrg, metaObject)) return;
+    let cancelled = false;
+    setFieldsLoading(true);
+    void loadFields(metaOrg, metaObject)
+      .then((loaded) => {
+        if (!cancelled && loaded.length) setFieldsVersion((v) => v + 1);
+      })
+      .finally(() => {
+        if (!cancelled) setFieldsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [metaOrg, metaObject]);
 
   // Per-column field metadata, including dot columns (Account.Name) resolved
   // through the describe cache. Dot paths resolve only from what's already
@@ -523,10 +574,76 @@ function RowsGrid({
     }
   }
 
+  // ── Row delete ───────────────────────────────────────────────────────────
+  // Same provenance rule as editing — the rows must have come from the org
+  // that's active right now, since `sf data delete record` hits whatever org
+  // is targeted. Unlike editing it needs no field metadata (there are no
+  // per-field permissions involved) and it works on Tooling objects too, so
+  // the FROM-object plus a row Id is enough.
+  const deleteOrg =
+    resultContext && resultContext.org === activeOrg ? resultContext.org : null;
+  const deleteObject = deleteOrg ? resultContext?.objectName ?? null : null;
+  const canDelete = !!(deleteOrg && deleteObject);
+
+  const [confirmDelete, setConfirmDelete] = useState<{
+    rowIdx: number;
+    recordId: string;
+    label: string;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Esc dismisses the confirmation — but never mid-delete, where it would
+  // hide a call that's still going to land.
+  useEffect(() => {
+    if (!confirmDelete) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !deleting) setConfirmDelete(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmDelete, deleting]);
+
+  async function doDelete() {
+    if (!confirmDelete || !deleteOrg || !deleteObject) return;
+    const { rowIdx, recordId } = confirmDelete;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteRecord({
+        orgAlias: deleteOrg,
+        objectName: deleteObject,
+        recordId,
+        useToolingApi: !!resultContext?.useToolingApi,
+      });
+      // Dropping the row shifts every index after it; anything keyed by row
+      // index (in-progress edit, cell error) is cleared by the result-change
+      // effect above, which fires because this writes a new result object.
+      deleteTabRecord(activeTabId, rowIdx);
+      setConfirmDelete(null);
+      setFlash(`Deleted ${deleteObject} ${recordId}`);
+    } catch (e) {
+      setDeleteError(toAppError(e).message);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  /** The table exactly as displayed — current sort, current column order.
+   *  Both the CSV export and the clipboard copy go through this so what you
+   *  see is what you get. */
+  function displayedTable() {
+    return {
+      cols: table.getVisibleLeafColumns().map((c) => c.id),
+      rows: rowModel.rows.map((r) => r.original),
+    };
+  }
+
   const handleExport = async () => {
-    setExportError(null);
+    setActionError(null);
     setExportSaved(null);
-    const csv = buildCsv(records, columnPaths, columnLabels);
+    const { cols, rows } = displayedTable();
+    const csv = buildCsv(rows, cols, columnLabels);
     const stamp = new Date()
       .toISOString()
       .replace(/[:T]/g, "-")
@@ -538,11 +655,32 @@ function RowsGrid({
         setExportSaved(res.path);
       }
     } catch (e) {
-      setExportError(toAppError(e).message);
+      setActionError(`Export failed: ${toAppError(e).message}`);
+    }
+  };
+
+  /** Copy the whole table to the clipboard as TSV — no save dialog, no file.
+   *  Pastes straight into Excel/Sheets or a message. */
+  const handleCopyTable = async () => {
+    setActionError(null);
+    setExportSaved(null);
+    const { cols, rows } = displayedTable();
+    try {
+      await navigator.clipboard.writeText(buildTsv(rows, cols, columnLabels));
+      setFlash(
+        `Copied ${rows.length.toLocaleString()} row${
+          rows.length === 1 ? "" : "s"
+        } × ${cols.length} column${cols.length === 1 ? "" : "s"}`,
+      );
+    } catch (e) {
+      setActionError(`Copy failed: ${toAppError(e).message}`);
     }
   };
 
   const totalWidth = table.getCenterTotalSize();
+  const actionColWidth = canDelete
+    ? ACTION_COL_WIDTH_WITH_DELETE
+    : ACTION_COL_WIDTH;
   const virtualRows = virtualizer.getVirtualItems();
   const paddingTop = virtualRows[0]?.start ?? 0;
   const paddingBottom =
@@ -565,7 +703,21 @@ function RowsGrid({
         </span>
         <span className="text-zinc-600">·</span>
         <span>{columnPaths.length} columns</span>
+        {fieldsLoading && (
+          <span
+            className="flex items-center gap-1.5 text-zinc-500"
+            title="Fetching the object describe — field types and inline editing light up when it lands."
+          >
+            <Spinner label="Loading field types" />
+            Loading field types…
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2 min-w-0">
+          {flash && (
+            <span className="text-emerald-400 truncate max-w-[40ch]" title={flash}>
+              {flash}
+            </span>
+          )}
           {editNotice && (
             <span
               className="text-amber-400 truncate max-w-[60ch]"
@@ -593,12 +745,12 @@ function RowsGrid({
               </button>
             </>
           )}
-          {exportError && (
+          {actionError && (
             <span
               className="text-red-400 truncate max-w-[40ch]"
-              title={exportError}
+              title={actionError}
             >
-              Export failed: {exportError}
+              {actionError}
             </span>
           )}
           {metaObject && instanceUrl && (
@@ -614,6 +766,13 @@ function RowsGrid({
               Object Setup ↗
             </button>
           )}
+          <button
+            onClick={() => void handleCopyTable()}
+            className="text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-2 py-0.5 whitespace-nowrap"
+            title="Copy the whole table to the clipboard (tab-separated — pastes into Excel, Sheets or a message). No file, no dialog."
+          >
+            Copy Table
+          </button>
           <button
             onClick={() => void handleExport()}
             className="text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-2 py-0.5 whitespace-nowrap"
@@ -631,15 +790,15 @@ function RowsGrid({
       >
         <table
           className="border-separate border-spacing-0 text-xs"
-          style={{ width: totalWidth + ACTION_COL_WIDTH, tableLayout: "fixed" }}
+          style={{ width: totalWidth + actionColWidth, tableLayout: "fixed" }}
         >
           <thead className="sticky top-0 z-10 bg-zinc-900">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
                 <th
-                  style={{ width: ACTION_COL_WIDTH }}
+                  style={{ width: actionColWidth }}
                   className="px-1 py-1.5 border-b border-r border-zinc-700 bg-zinc-900"
-                  aria-label="Open record"
+                  aria-label="Row actions"
                 />
                 {hg.headers.map((header) => {
                   // Drag-and-drop column reordering. HTML5 DnD keeps the impl
@@ -750,22 +909,42 @@ function RowsGrid({
                   style={{ height: vr.size }}
                 >
                   <td
-                    style={{ width: ACTION_COL_WIDTH }}
-                    className="px-1 border-b border-r border-zinc-800 text-center align-middle"
+                    style={{ width: actionColWidth }}
+                    className="px-1 border-b border-r border-zinc-800 align-middle"
                   >
-                    {recordId && instanceUrl && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void openUrl(`${instanceUrl}/${recordId}`);
-                        }}
-                        className="text-zinc-600 hover:text-blue-400 transition-colors align-middle"
-                        title="Open record in Salesforce"
-                        aria-label="Open record in Salesforce"
-                      >
-                        <EyeIcon />
-                      </button>
-                    )}
+                    <div className="flex items-center justify-center gap-1.5">
+                      {recordId && instanceUrl && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void openUrl(`${instanceUrl}/${recordId}`);
+                          }}
+                          className="text-zinc-600 hover:text-blue-400 transition-colors"
+                          title="Open record in Salesforce"
+                          aria-label="Open record in Salesforce"
+                        >
+                          <EyeIcon />
+                        </button>
+                      )}
+                      {recordId && canDelete && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteError(null);
+                            setConfirmDelete({
+                              rowIdx: originalRowIdx,
+                              recordId,
+                              label: pickDisplayValue(row.original),
+                            });
+                          }}
+                          className="text-zinc-600 hover:text-red-400 transition-colors"
+                          title={`Delete this ${deleteObject} record`}
+                          aria-label="Delete record"
+                        >
+                          <TrashIcon />
+                        </button>
+                      )}
+                    </div>
                   </td>
                   {row.getVisibleCells().map((cell) => {
                     const colId = cell.column.id;
@@ -901,6 +1080,71 @@ function RowsGrid({
             <pre className="flex-1 overflow-auto p-4 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words">
               {detail.value}
             </pre>
+          </div>
+        </div>
+      )}
+
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
+          onClick={() => {
+            if (!deleting) setConfirmDelete(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm delete"
+            className="flex flex-col w-full max-w-md bg-zinc-900 border border-red-900/50 rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-zinc-800 text-sm font-medium text-zinc-100">
+              Delete this {deleteObject} record?
+            </div>
+
+            <div className="flex flex-col gap-2 px-4 py-3 text-xs text-zinc-300">
+              {confirmDelete.label &&
+                confirmDelete.label !== confirmDelete.recordId && (
+                  <div className="truncate" title={confirmDelete.label}>
+                    {confirmDelete.label}
+                  </div>
+                )}
+              <div className="font-mono text-zinc-400">
+                {confirmDelete.recordId}
+              </div>
+              <div className="text-amber-400/90">
+                Deletes it in org{" "}
+                <span className="font-mono">{deleteOrg}</span>
+                {resultContext?.useToolingApi ? " via the Tooling API" : ""}.
+                Most objects land in the org's Recycle Bin; some are gone for
+                good.
+              </div>
+              {deleteError && (
+                <div className="max-h-40 overflow-auto rounded border border-red-900/50 bg-red-950/40 p-2 font-mono text-red-300 whitespace-pre-wrap break-words">
+                  {deleteError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-4 py-2.5 border-t border-zinc-800">
+              <button
+                autoFocus
+                onClick={() => setConfirmDelete(null)}
+                disabled={deleting}
+                className="text-xs text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-3 py-1 disabled:opacity-50"
+                title="Close without deleting (Esc)"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void doDelete()}
+                disabled={deleting}
+                className="flex items-center gap-1.5 text-xs text-white bg-red-700 hover:bg-red-600 rounded px-3 py-1 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {deleting && <Spinner />}
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+            </div>
           </div>
         </div>
       )}
