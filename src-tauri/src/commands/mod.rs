@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod delete;
 pub mod export;
 pub mod org_manage;
 pub mod orgs;
