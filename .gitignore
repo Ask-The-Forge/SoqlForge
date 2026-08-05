@@ -30,3 +30,7 @@ dist-release
 
 # Local agent tooling config
 .claude/
+
+# Local app screenshots — kept out of the repo on purpose. They're captures of
+# a dev org's sample data, not build inputs; nothing references them.
+screenshots/
