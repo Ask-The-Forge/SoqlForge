@@ -1,6 +1,6 @@
 # SOQLForge — Project Agents & Architecture Guide
 
-> A SOQLXplorer-style desktop application for Windows that uses the Salesforce CLI (`sf`) as its backend engine. All Salesforce data operations go through CLI subprocess calls — no direct API calls, no managed packages, no auth token handling in the app.
+> A SOQLXplorer-style desktop application for Windows and macOS that uses the Salesforce CLI (`sf`) as its backend engine. All Salesforce data operations go through CLI subprocess calls — no direct API calls, no managed packages, no auth token handling in the app.
 
 ---
 
@@ -286,6 +286,12 @@ export const runSoql = (orgAlias: string, query: string, tooling = false) =>
 winget install Rustlang.Rustup
 winget install Salesforce.SalesforceCLI
 node >= 18 (via nvm-windows or fnm)
+
+# macOS
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+brew install sf
+node >= 18 (via nvm, fnm, or brew)
 ```
 
 ### Bootstrap
@@ -302,9 +308,33 @@ npm run tauri dev
 ```bash
 npm run tauri build
 # Produces: src-tauri/target/release/bundle/
-#   nsis/SOQLForge_x.x.x_x64-setup.exe  (installer)
-#   msi/SOQLForge_x.x.x_x64.msi         (MSI for enterprise)
+#   Windows:
+#     nsis/SoqlForge_x.x.x_x64-setup.exe  (installer)
+#     msi/SoqlForge_x.x.x_x64.msi         (MSI for enterprise)
+#   macOS:
+#     dmg/SoqlForge_x.x.x_<arch>.dmg      (disk image)
+#     macos/SoqlForge.app                 (app bundle)
 ```
+
+**Platform split in the CLI bridge.** `src-tauri/src/cli.rs` is the one file
+where the two targets genuinely diverge, and the divergences are not cosmetic:
+
+- **Argument quoting.** On Windows `sf` is a `.cmd` batch file, so args go
+  through cmd.exe and need `raw_arg` + manual quoting (BatBadBut,
+  CVE-2024-24576). Unix hands argv straight to `execve` — no quoting layer, and
+  no `%VAR%` hazard, which is why the `%...%` rejection in
+  `commands/update.rs` is `#[cfg(windows)]`.
+- **PATH.** A Finder-launched macOS app inherits launchd's
+  `/usr/bin:/bin:/usr/sbin:/sbin`, so `sf` is invisible to a plain PATH lookup
+  even when it works in Terminal. `SEARCH_PATH` rebuilds a usable one and is
+  also handed to the child, since `sf` is a shell script that has to find
+  `node` itself.
+- **Cancellation.** `sf` spawns node as a *child* on both platforms, so killing
+  the direct pid isn't enough: Windows uses `taskkill /T`, Unix spawns into a
+  new process group and signals the negated pid.
+
+CI runs `cargo clippy`/`cargo test` on both OSes because each build only ever
+compiles half of this.
 
 ---
 
