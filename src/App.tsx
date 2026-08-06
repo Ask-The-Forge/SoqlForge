@@ -15,6 +15,7 @@ import { OrgManagerPanel } from "./components/OrgManager/OrgManagerPanel";
 import { TabBar } from "./components/TabBar/TabBar";
 import { useQuery } from "./hooks/useQuery";
 import { useAppStore } from "./stores/appStore";
+import { shortcut } from "./lib/platform";
 import "./App.css";
 
 function App() {
@@ -31,7 +32,7 @@ function App() {
     root.classList.add(theme === "light" ? "theme-light" : "theme-dark");
   }, [theme]);
 
-  // Window-level shortcuts: Ctrl+, opens settings; Esc closes.
+  // Window-level shortcuts: Ctrl/Cmd+, opens settings; Esc closes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === ",") {
@@ -61,7 +62,7 @@ function App() {
         <button
           onClick={() => setSettingsOpen(true)}
           className="ml-4 text-xs text-zinc-400 hover:text-zinc-100"
-          title="Settings (Ctrl+,)"
+          title={`Settings (${shortcut(",")})`}
         >
           ⚙ Settings
         </button>
