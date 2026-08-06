@@ -13,9 +13,19 @@ dist-ssr
 dist-release
 *.local
 
-# Updater signing keys — NEVER commit these.
+# Signing material — NEVER commit these.
+# Updater keypair:
 *.key
 *.key.pub
+# Apple code-signing certificates and anything derived from them. A .p12
+# carries the private key; treat it like a password.
+*.p12
+*.pfx
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.p12.base64
+*.p8
 
 # Editor directories and files
 .vscode/*
