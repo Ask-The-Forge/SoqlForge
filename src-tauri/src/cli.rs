@@ -9,6 +9,8 @@
 //! - Query timeout default 30s, configurable
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -49,16 +51,177 @@ pub fn set_config(cfg: CliConfig) {
     *CONFIG.write().expect("config lock poisoned") = cfg;
 }
 
-/// Resolve the `sf` executable: prefer override, then PATH.
-fn resolve_sf() -> Result<String, AppError> {
-    let cfg = get_config();
-    if let Some(p) = cfg.path_override.as_ref().filter(|s| !s.is_empty()) {
-        return Ok(p.clone());
+// ─────────────────────────────────────────────────────────────────────────────
+// PATH resolution
+//
+// A GUI app launched from Finder or the Dock inherits launchd's minimal PATH
+// (`/usr/bin:/bin:/usr/sbin:/sbin`) — NOT the one the user's shell profile
+// builds. `sf` never lives in those four directories, so on macOS a
+// double-clicked SoqlForge.app would fail every command with "CLI not found"
+// even though `sf` works fine in Terminal. (Windows has no such split: the
+// registry PATH is inherited by GUI and console processes alike.)
+//
+// So we build our own search path once: what we inherited, then the user's
+// login-shell PATH, then the well-known install locations. It's used both to
+// FIND `sf` and as the PATH handed to the child — that second part matters
+// because on macOS `sf` is a bash wrapper that execs `node`, so `node` has to
+// be reachable too.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static SEARCH_PATH: Lazy<OsString> = Lazy::new(|| compose_search_path(std::env::var_os("PATH")));
+
+/// Build `SEARCH_PATH` now, off the main thread, so nobody waits for it later.
+///
+/// Composing it spawns a login shell (see `login_shell_path`), which costs
+/// anywhere from a few milliseconds to the 3s ceiling depending on what the
+/// user's rc files do. Called from `setup()`: startup has time to spare, the
+/// first query does not.
+pub fn warm_path_cache() {
+    std::thread::spawn(|| {
+        Lazy::force(&SEARCH_PATH);
+    });
+}
+
+/// Split out from the static so tests can feed it a synthetic starting PATH
+/// (notably the four-entry one launchd hands a Finder-launched app) instead of
+/// mutating the process environment out from under other threads.
+fn compose_search_path(inherited: Option<OsString>) -> OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    // Inherited PATH first — if the user launched from a terminal, or set PATH
+    // deliberately, that ordering wins over anything we guess at.
+    if let Some(p) = inherited.as_ref() {
+        dirs.extend(std::env::split_paths(p));
     }
+
+    #[cfg(target_os = "macos")]
+    if let Some(p) = login_shell_path() {
+        dirs.extend(std::env::split_paths(&p));
+    }
+
+    #[cfg(unix)]
+    dirs.extend(well_known_dirs());
+
+    // De-dupe, preserving first-seen order.
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+
+    std::env::join_paths(dirs).unwrap_or_else(|_| inherited.unwrap_or_default())
+}
+
+/// Ask the user's login shell what its PATH is.
+///
+/// `-l` sources the login files (`.zprofile`, `.profile` — where Homebrew's
+/// `brew shellenv` lands); `-i` sources the interactive ones (`.zshrc` — where
+/// nvm and fnm put theirs). The marker isolates our value from anything those
+/// rc files print on their way through, and the whole thing runs on a throwaway
+/// thread with a deadline so a shell that hangs waiting on input can't take the
+/// app's worker thread down with it.
+#[cfg(target_os = "macos")]
+fn login_shell_path() -> Option<OsString> {
+    const MARKER: &str = "__soqlforge_path__";
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&shell)
+            .args(["-l", "-i", "-c", &format!("printf '{MARKER}%s' \"$PATH\"")])
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let out = rx.recv_timeout(PROBE_TIMEOUT).ok()?.ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let path = stdout.rsplit(MARKER).next()?.trim();
+    (!path.is_empty()).then(|| OsString::from(path))
+}
+
+/// Directories `sf` (and the `node` it needs) commonly install into, which a
+/// Finder-launched app won't have on PATH. Only existing ones are returned.
+#[cfg(unix)]
+fn well_known_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/opt/homebrew/bin"), // Homebrew, Apple Silicon
+        PathBuf::from("/usr/local/bin"),    // Homebrew (Intel), sf's own .pkg, npm default
+    ];
+
+    if let Some(h) = home.as_ref() {
+        candidates.extend([
+            h.join(".local/bin"),
+            h.join(".volta/bin"),
+            h.join(".npm-global/bin"),
+            h.join(".asdf/shims"),
+            // oclif self-update relocates the real binary here.
+            h.join(".local/share/sf/client/bin"),
+        ]);
+        // nvm and fnm keep one bin dir per installed Node version; enumerate
+        // rather than guess a version. Newest-first isn't worth the sort —
+        // any of them can run `sf`.
+        candidates.extend(version_manager_bins(h));
+    }
+
+    candidates.retain(|d| d.is_dir());
+    candidates
+}
+
+/// `~/.nvm/versions/node/*/bin` and fnm's equivalent.
+#[cfg(unix)]
+fn version_manager_bins(home: &std::path::Path) -> Vec<PathBuf> {
+    let nvm = std::env::var_os("NVM_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".nvm"));
+
+    let roots = [
+        (nvm.join("versions/node"), PathBuf::from("bin")),
+        (
+            home.join("Library/Application Support/fnm/node-versions"),
+            PathBuf::from("installation/bin"),
+        ),
+    ];
+
+    let mut out = Vec::new();
+    for (root, suffix) in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        out.extend(entries.flatten().map(|e| e.path().join(&suffix)));
+    }
+    out
+}
+
+/// Resolve the `sf` executable: prefer the settings override, then search
+/// `SEARCH_PATH`.
+fn resolve_sf() -> Result<PathBuf, AppError> {
+    let cfg = get_config();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
     // On Windows `sf` is typically `sf.cmd`; `which` handles PATHEXT.
-    which::which("sf")
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|_| AppError::CliNotFound)
+    let name = match cfg.path_override.as_ref().filter(|s| !s.is_empty()) {
+        // An override with a separator in it is a location — take it as given.
+        Some(p) if PathBuf::from(p).components().count() > 1 => return Ok(PathBuf::from(p)),
+        // A bare name still needs looking up, and it has to be looked up in
+        // SEARCH_PATH rather than whatever bare PATH launchd handed us.
+        Some(p) => p.clone(),
+        None => "sf".to_string(),
+    };
+    which::which_in(&name, Some(&*SEARCH_PATH), cwd).map_err(|_| AppError::CliNotFound)
+}
+
+/// The PATH to hand the `sf` child process: our search path with the resolved
+/// binary's own directory in front. That leading entry is what lets an
+/// npm/nvm/volta-installed `sf` — a script whose first act is to look up
+/// `node` — find the `node` sitting next to it.
+fn child_path(sf: &std::path::Path) -> OsString {
+    let Some(parent) = sf.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return SEARCH_PATH.clone();
+    };
+    let dirs = std::iter::once(parent.to_path_buf())
+        .chain(std::env::split_paths(&*SEARCH_PATH).filter(|d| d != parent));
+    std::env::join_paths(dirs).unwrap_or_else(|_| SEARCH_PATH.clone())
 }
 
 /// Quote a single command-line argument for safe consumption by a Windows
@@ -77,6 +240,7 @@ fn resolve_sf() -> Result<String, AppError> {
 /// even inside quotes, so callers must keep user text containing `%` off the
 /// command line: queries with `%` route through a temp file
 /// (`write_query_file`), and record updates reject `%...%` values outright.
+#[cfg(windows)]
 fn quote_cmd_arg(arg: &str) -> String {
     let mut out = String::with_capacity(arg.len() + 2);
     out.push('"');
@@ -126,8 +290,9 @@ struct RunHandle {
 
 static RUNNING: Lazy<Mutex<HashMap<String, RunHandle>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Kill a process and all of its children. `sf` is a cmd shim that spawns
-/// node, so killing just the direct child would leave the real work running.
+/// Kill a process and all of its children. `sf` is a shim that spawns node —
+/// a `.cmd` batch file on Windows, a bash script on macOS/Linux — so killing
+/// just the direct child would leave the real work running.
 fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
@@ -138,11 +303,37 @@ fn kill_tree(pid: u32) {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .spawn();
+        // We spawn `sf` into its own process group (see `spawn_detached`), so
+        // signalling the negated pid reaches the wrapper AND the node process
+        // it exec'd. Confirm the child really is its own group leader first —
+        // if `process_group` didn't take, its pgid is *ours*, and killing that
+        // group would take down SoqlForge itself.
+        let pid = pid as libc::pid_t;
+        let target = if unsafe { libc::getpgid(pid) } == pid {
+            -pid
+        } else {
+            pid
+        };
+        unsafe { libc::kill(target, libc::SIGKILL) };
+    }
+}
+
+/// Platform tweaks applied to every `sf` spawn.
+fn spawn_detached(cmd: &mut Command) {
+    // Windows: don't flash a console window when spawned from a GUI app.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    // Unix: give the child its own process group so cancelling a run can kill
+    // the wrapper and its node child together. See `kill_tree`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.as_std_mut().process_group(0);
     }
 }
 
@@ -220,7 +411,7 @@ pub async fn run_sf_json_cancellable(
     // alone, and we escape interior `"` per cmd's `""` convention.
     #[cfg(windows)]
     {
-        let lower = sf.to_ascii_lowercase();
+        let lower = sf.to_string_lossy().to_ascii_lowercase();
         if lower.ends_with(".cmd") || lower.ends_with(".bat") {
             for arg in args {
                 cmd.raw_arg(quote_cmd_arg(arg));
@@ -234,12 +425,11 @@ pub async fn run_sf_json_cancellable(
         cmd.args(args);
     }
 
-    // On Windows, avoid flashing a console window when spawned from a GUI app.
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    // Hand the child the same enriched PATH we used to find it — `sf` is a
+    // shim that has to locate `node` for itself, and under a Finder launch the
+    // inherited PATH is too bare to do that. See SEARCH_PATH.
+    cmd.env("PATH", child_path(&sf));
+    spawn_detached(&mut cmd);
 
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -412,6 +602,154 @@ fn classify_sf_error(name: &str, message: &str) -> AppError {
 mod tests {
     use super::*;
 
+    /// What launchd hands a Finder- or Dock-launched app on macOS.
+    #[cfg(unix)]
+    const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+    #[cfg(unix)]
+    #[test]
+    fn search_path_keeps_inherited_entries_in_front() {
+        let composed = compose_search_path(Some(OsString::from("/zz-first:/zz-second")));
+        let dirs: Vec<_> = std::env::split_paths(&composed).collect();
+        assert_eq!(dirs[0], PathBuf::from("/zz-first"));
+        assert_eq!(dirs[1], PathBuf::from("/zz-second"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_path_adds_well_known_dirs_a_bare_path_lacks() {
+        let composed = compose_search_path(Some(OsString::from(LAUNCHD_PATH)));
+        let dirs: Vec<_> = std::env::split_paths(&composed).collect();
+        // At least one real install location must have been appended, or a
+        // Finder launch would still fail to find `sf`.
+        assert!(
+            dirs.len() > 4,
+            "nothing added to the launchd PATH: {composed:?}"
+        );
+        for d in std::env::split_paths(&OsString::from(LAUNCHD_PATH)) {
+            assert!(dirs.contains(&d), "dropped inherited entry {d:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_path_has_no_duplicates() {
+        // /usr/bin appears in both the inherited PATH and (via HOME probing or
+        // the well-known list) potentially again.
+        let composed = compose_search_path(Some(OsString::from("/usr/local/bin:/usr/bin:/bin")));
+        let dirs: Vec<_> = std::env::split_paths(&composed).collect();
+        let mut uniq = dirs.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(dirs.len(), uniq.len(), "duplicate entries in {composed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_path_leads_with_the_binarys_own_directory() {
+        // An npm/nvm-installed `sf` is a script that looks up `node`; the node
+        // it needs sits in the same bin dir, so that dir has to come first.
+        let composed = child_path(std::path::Path::new("/opt/somewhere/bin/sf"));
+        let first = std::env::split_paths(&composed).next().unwrap();
+        assert_eq!(first, PathBuf::from("/opt/somewhere/bin"));
+    }
+
+    /// End-to-end check of the Finder-launch fix against the `sf` actually
+    /// installed on this machine. Ignored by default — CI runners have no `sf`.
+    ///
+    ///   cargo test -- --ignored finds_real_sf
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires the Salesforce CLI to be installed locally"]
+    fn finds_real_sf_under_a_launchd_path() {
+        let composed = compose_search_path(Some(OsString::from(LAUNCHD_PATH)));
+        let cwd = std::env::current_dir().expect("cwd");
+        let found = which::which_in("sf", Some(&composed), cwd);
+        assert!(
+            found.is_ok(),
+            "sf unreachable from a Finder-style PATH — a double-clicked \
+             SoqlForge.app would report CLI_NOT_FOUND. Searched: {composed:?}"
+        );
+    }
+
+    /// Cancelling a run has to reach the *grandchild*. `sf` is a shell script
+    /// that spawns node, so a plain `kill(pid)` would drop the wrapper and
+    /// leave the query running against the org. This reproduces that exact
+    /// topology with `sh` + a backgrounded `sleep` — no Salesforce needed.
+    #[cfg(unix)]
+    #[test]
+    fn kill_tree_reaps_the_grandchild_not_just_the_wrapper() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async move {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg("-c")
+                .arg("sleep 30 & echo $!; wait")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped());
+            spawn_detached(&mut cmd);
+
+            let mut child = cmd.spawn().expect("spawn sh");
+            let wrapper = child.id().expect("wrapper pid");
+
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().expect("stdout"))
+                .read_line(&mut line)
+                .await
+                .expect("read grandchild pid");
+            let grandchild: i32 = line.trim().parse().expect("grandchild pid");
+
+            assert!(alive(grandchild), "grandchild never started");
+
+            kill_tree(wrapper);
+
+            // Reparenting to launchd/init and reaping isn't instantaneous.
+            for _ in 0..40 {
+                if !alive(grandchild) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!(
+                "grandchild {grandchild} survived kill_tree — cancel would leak an sf/node process"
+            );
+        });
+    }
+
+    /// The whole macOS chain end to end — resolve `sf`, hand the child a PATH
+    /// it can find `node` on, spawn it in its own process group, parse the
+    /// envelope — against the real CLI. Ignored by default; run it under a
+    /// stripped environment to reproduce a Finder launch for real:
+    ///
+    /// ```text
+    /// env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    ///   "$(cargo test --lib --no-run --message-format=json \
+    ///      | jq -r 'select(.profile.test==true).executable')" \
+    ///   --ignored --exact cli::tests::bridge_reaches_sf_from_a_bare_env
+    /// ```
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires the Salesforce CLI to be installed locally"]
+    fn bridge_reaches_sf_from_a_bare_env() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let result = rt.block_on(run_sf_json(&["org", "list", "--json"]));
+        assert!(
+            result.is_ok(),
+            "the sf bridge failed from PATH={:?}: {result:?}",
+            std::env::var_os("PATH")
+        );
+    }
+
     #[test]
     fn strip_ansi_removes_color_codes() {
         let input = "\x1b[31mError:\x1b[0m something \x1b[1;33mbroke\x1b[0m";
@@ -491,11 +829,13 @@ mod tests {
         assert!(extract_text_mode_sf_error("{\"status\":0,\"result\":{}}").is_none());
     }
 
+    #[cfg(windows)]
     #[test]
     fn quote_cmd_arg_plain() {
         assert_eq!(quote_cmd_arg("hello"), "\"hello\"");
     }
 
+    #[cfg(windows)]
     #[test]
     fn quote_cmd_arg_with_metacharacters() {
         // SOQL-shaped input — what the user's query has.
@@ -508,6 +848,7 @@ mod tests {
         assert!(q.contains("(X != null OR Y = 1)"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn quote_cmd_arg_escapes_interior_quotes() {
         // Salesforce string literals are single-quoted, but defensively handle "
@@ -515,6 +856,7 @@ mod tests {
         assert_eq!(q, r#""say ""hi""""#);
     }
 
+    #[cfg(windows)]
     #[test]
     fn quote_cmd_arg_trailing_backslashes_doubled() {
         // Trailing `\` must be doubled so the closing `"` isn't escaped.
