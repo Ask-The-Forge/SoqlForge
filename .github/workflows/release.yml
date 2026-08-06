@@ -3,16 +3,22 @@ name: Release
 # Cut a release by pushing a tag, e.g.:
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# This builds the signed NSIS + MSI installers, generates the updater's
-# `latest.json`, and publishes them all to a GitHub Release. Installed apps
-# poll the release's `latest.json` and self-update (see tauri.conf.json →
-# plugins.updater).
+# This builds the signed Windows installers (NSIS + MSI) and macOS disk images
+# (Apple Silicon + Intel), generates the updater's `latest.json`, and publishes
+# them all to a GitHub Release. Installed apps poll that `latest.json` and
+# self-update (see tauri.conf.json → plugins.updater).
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the private key file
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the password set when generating it
 # Generate the keypair once with:  npx tauri signer generate -w soqlforge.key
 # and paste the matching PUBLIC key into tauri.conf.json → plugins.updater.pubkey.
+#
+# Optional (macOS code signing + notarization — see DEPLOYMENT.md). Without
+# these the .dmg still builds and installs, but Gatekeeper makes users take an
+# extra step on first launch:
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
 
 on:
   push:
@@ -24,8 +30,27 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      # Serialized on purpose. Each job merges its platform into the shared
+      # `latest.json` asset by download → merge → re-upload; running them in
+      # parallel lets two jobs read the same base and the loser's platform
+      # silently vanishes from the manifest.
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust-targets: aarch64-apple-darwin
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust-targets: x86_64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,10 +60,13 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.platform }}-${{ matrix.rust-targets }}
 
       - name: Install frontend deps
         run: npm ci
@@ -48,10 +76,32 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # All empty unless the optional Apple secrets above are configured,
+          # in which case tauri-action signs and notarizes the .app/.dmg.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           # ${__VERSION__} is filled from tauri.conf.json at build time.
           tagName: ${{ github.ref_name }}
           releaseName: "SoqlForge ${{ github.ref_name }}"
           releaseBody: "See the assets below to download and install. Installed apps update automatically."
-          releaseDraft: false
+          # Held as a draft until every platform has landed — the updater
+          # endpoint resolves to `releases/latest`, so publishing early would
+          # briefly advertise a manifest that's missing half its platforms.
+          releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false --latest

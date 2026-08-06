@@ -7,7 +7,8 @@ on:
 
 jobs:
   frontend:
-    runs-on: windows-latest
+    # Platform-agnostic (tsc + vite), so one cheap runner is enough.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,7 +22,14 @@ jobs:
         run: npx vite build
 
   rust:
-    runs-on: windows-latest
+    # Both platforms: the CLI bridge is full of `#[cfg(windows)]` / `#[cfg(unix)]`
+    # branches, so a green Windows run says nothing about macOS — each side only
+    # ever compiles half the file (and clippy only lints the half it compiles).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: src-tauri
@@ -33,6 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.os }}
       - name: Format check
         run: cargo fmt --check
       - name: Clippy
