@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
+#[cfg(windows)]
 use once_cell::sync::Lazy;
+#[cfg(windows)]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +17,7 @@ use crate::cli::run_sf_json;
 use crate::error::AppError;
 
 /// Anything cmd.exe might treat as a `%VAR%` environment-variable expansion.
+#[cfg(windows)]
 static POTENTIAL_ENV_EXPANSION: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"%[^%]+%").expect("valid env-expansion regex"));
 
@@ -48,9 +51,10 @@ pub async fn update_record(args: UpdateRecordArgs) -> Result<UpdateRecordResult,
     // Build the --values string: `Field1=Value1 Field2="multi word"`.
     let values_str = encode_values(&args.values);
 
-    // Newlines can't survive the cmd.exe hop to sf.cmd (the command line is
-    // truncated at the first one, corrupting the update). The cell editors are
-    // single-line so this shouldn't happen from the UI — hard-stop just in case.
+    // `sf` splits --values on whitespace, so a newline would corrupt the pair
+    // list regardless of platform (and on Windows it truncates the command line
+    // outright). The cell editors are single-line so this shouldn't happen from
+    // the UI — hard-stop just in case.
     if values_str.contains('\n') || values_str.contains('\r') {
         return Err(AppError::CliError(
             "Multi-line values can't be saved through the CLI bridge — edit this field in Salesforce directly.".into(),
@@ -61,6 +65,11 @@ pub async fn update_record(args: UpdateRecordArgs) -> Result<UpdateRecordResult,
     // escape for it (CVE-2024-24576), so a value like "%path% due" would write
     // expanded garbage to the org. Unlike queries there is no file-based
     // alternative for `--values`, so refuse anything that cmd could expand.
+    //
+    // Windows-only: every other platform hands argv straight to execve, where
+    // `%` is an ordinary character. Gating this matters — the pattern catches
+    // perfectly reasonable values like "50%-75% complete".
+    #[cfg(windows)]
     if POTENTIAL_ENV_EXPANSION.find(&values_str).is_some() {
         return Err(AppError::CliError(
             "Values containing a %...% pattern can't be saved safely through the CLI bridge — edit this field in Salesforce directly.".into(),
@@ -149,6 +158,7 @@ mod tests {
         assert_eq!(quote_if_needed(r#"O"Brien"#), r#""O\"Brien""#);
     }
 
+    #[cfg(windows)]
     #[test]
     fn env_expansion_guard_catches_var_patterns() {
         assert!(POTENTIAL_ENV_EXPANSION.find("%path%").is_some());

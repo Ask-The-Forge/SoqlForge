@@ -24,6 +24,11 @@ pub fn run() {
             // Load persisted CLI settings (if any) at startup so the user's
             // path override and timeout survive a relaunch.
             commands::settings::load_persisted(app.handle());
+
+            // Work out where `sf` can be found while the window is still
+            // painting — on macOS that involves spawning a login shell, and
+            // it's latency the first query shouldn't have to pay.
+            cli::warm_path_cache();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -31,3 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # the cfg gate so it never leaks into a mobile build).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
+
+# Used to signal the `sf` process group on cancel (see cli::kill_tree).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
