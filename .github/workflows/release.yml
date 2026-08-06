@@ -88,7 +88,24 @@ jobs:
           # ${__VERSION__} is filled from tauri.conf.json at build time.
           tagName: ${{ github.ref_name }}
           releaseName: "SoqlForge ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install. Installed apps update automatically."
+          # A multi-platform release ships ~9 assets; without a key, people
+          # guess. Each job passes the same body — tauri-action sets it once
+          # when it creates the release and leaves it alone afterwards.
+          releaseBody: |
+            Already installed? Nothing to do — the app updates itself.
+
+            **Windows** — `SoqlForge_*_x64-setup.exe` (recommended) or
+            `SoqlForge_*_x64_en-US.msi` for enterprise deployment.
+
+            **macOS, Apple Silicon** (M1 and later) — `SoqlForge_*_aarch64.dmg`
+
+            **macOS, Intel** — `SoqlForge_*_x64.dmg`
+
+            Not sure which Mac you have? Apple menu → About This Mac. "Apple M…"
+            means Apple Silicon.
+
+            The `.sig` and `.tar.gz` files are for the auto-updater; you don't
+            need to download them.
           # Held as a draft until every platform has landed — the updater
           # endpoint resolves to `releases/latest`, so publishing early would
           # briefly advertise a manifest that's missing half its platforms.
