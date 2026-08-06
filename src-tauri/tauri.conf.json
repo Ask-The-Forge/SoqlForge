@@ -36,13 +36,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
+    "targets": "all",
     "createUpdaterArtifacts": true,
     "publisher": "Ask the Forge",
     "copyright": "Copyright (c) 2026 Ask the Forge",
     "category": "DeveloperTool",
     "shortDescription": "A SOQL desktop client for the Salesforce CLI",
-    "longDescription": "SoqlForge is a desktop SOQL workspace for Windows that drives the Salesforce CLI (sf) as its backend. Multiple query tabs, schema-aware autocomplete with relationship traversal, inline cell editing, optional NL->SOQL assist, and CSV export.",
+    "longDescription": "SoqlForge is a desktop SOQL workspace that drives the Salesforce CLI (sf) as its backend. Multiple query tabs, schema-aware autocomplete with relationship traversal, inline cell editing, optional NL->SOQL assist, and CSV export.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -59,6 +59,9 @@
         "displayLanguageSelector": false,
         "installMode": "currentUser"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   }
 }
