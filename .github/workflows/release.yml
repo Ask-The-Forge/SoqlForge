@@ -71,6 +71,44 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # Signing is opt-in via secrets, and a missing or blank APPLE_CERTIFICATE
+      # doesn't fail the build — it just produces an unsigned app, which nobody
+      # notices until a user reports "SoqlForge is damaged". State the mode
+      # up front so it's visible in the log, and catch the specific trap of a
+      # certificate that's configured but unusable.
+      - name: Determine macOS signing mode
+        if: startsWith(matrix.platform, 'macos')
+        id: signing
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_USER: ${{ secrets.APPLE_ID }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "expected=unsigned" >> "$GITHUB_OUTPUT"
+            echo "::warning::APPLE_CERTIFICATE is unset or empty — building UNSIGNED. Users will hit Gatekeeper."
+            exit 0
+          fi
+          # A blank secret and a truncated one look identical downstream; a real
+          # base64'd Developer ID .p12 is a few KB.
+          if ! printf '%s' "$CERT" | base64 --decode > /tmp/cert.p12 2>/dev/null; then
+            echo "::error::APPLE_CERTIFICATE is not valid base64."
+            exit 1
+          fi
+          SIZE=$(wc -c < /tmp/cert.p12 | tr -d ' ')
+          if [ "$SIZE" -lt 1000 ]; then
+            echo "::error::APPLE_CERTIFICATE decoded to $SIZE bytes — too small to be a .p12. Re-run the base64 step."
+            exit 1
+          fi
+          if ! openssl pkcs12 -in /tmp/cert.p12 -noout -passin env:CERT_PASSWORD 2>/dev/null; then
+            echo "::error::APPLE_CERTIFICATE won't open with APPLE_CERTIFICATE_PASSWORD — one of the two is wrong."
+            exit 1
+          fi
+          rm -f /tmp/cert.p12
+          [ -n "$NOTARY_USER" ] || echo "::warning::APPLE_ID unset — the app will be signed but NOT notarized."
+          echo "expected=signed" >> "$GITHUB_OUTPUT"
+          echo "Certificate verified — building signed."
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,6 +150,28 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # The pre-flight proves the certificate is good; this proves it was
+      # actually applied. Without it a misconfiguration downstream of the
+      # secrets still ships a silently unsigned .dmg to the release.
+      - name: Verify the built app is signed
+        if: startsWith(matrix.platform, 'macos') && steps.signing.outputs.expected == 'signed'
+        run: |
+          APP=$(find src-tauri/target -type d -name 'SoqlForge.app' -path '*/bundle/macos/*' | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::no SoqlForge.app found under src-tauri/target"
+            exit 1
+          fi
+          if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
+            echo "::error::$APP is not correctly signed despite a verified certificate."
+            exit 1
+          fi
+          codesign -dvv "$APP" 2>&1 | grep -E '^(Authority|TeamIdentifier)' || true
+          # Gatekeeper's own verdict. Only passes once the notarization ticket
+          # is stapled, so treat a failure as a warning — signing succeeded
+          # either way, and notarization is separately optional.
+          spctl --assess --type exec -vv "$APP" 2>&1 \
+            || echo "::warning::Gatekeeper assessment failed — signed but likely not notarized."
 
   publish:
     needs: build
