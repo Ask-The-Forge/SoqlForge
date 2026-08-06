@@ -18,6 +18,7 @@ import {
 import { tags as t } from "@lezer/highlight";
 
 import { useAppStore } from "../../stores/appStore";
+import { shortcut } from "../../lib/platform";
 import { type UseQueryResult } from "../../hooks/useQuery";
 import { useEditorSchema } from "../../hooks/useEditorSchema";
 import { soqlLanguage } from "./soqlLanguage";
@@ -279,7 +280,7 @@ export function QueryEditor({ query, onOpenSettings }: QueryEditorProps) {
           onClick={() => void query.run()}
           disabled={query.isRunning || noOrg}
           className="px-3 py-1 text-sm rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium"
-          title={noOrg ? "Select an org first" : "Run (Ctrl+Enter)"}
+          title={noOrg ? "Select an org first" : `Run (${shortcut("Enter")})`}
         >
           {query.isRunning ? "Running…" : "Run"}
         </button>
@@ -365,7 +366,7 @@ export function QueryEditor({ query, onOpenSettings }: QueryEditorProps) {
         </label>
 
         <div className="ml-auto text-xs text-zinc-500">
-          Ctrl+Enter to run
+          {shortcut("Enter")} to run
         </div>
       </div>
 
