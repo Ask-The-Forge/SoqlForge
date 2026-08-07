@@ -44,6 +44,7 @@ pub fn run() {
             commands::ai::ai_generate_soql,
             commands::export::save_csv,
             commands::update::update_record,
+            commands::delete::delete_record,
             commands::org_manage::org_login_web,
             commands::org_manage::org_logout,
             commands::org_manage::org_set_default,
