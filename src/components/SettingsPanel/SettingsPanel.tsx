@@ -348,6 +348,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               <AskTheForgeLink className="text-amber-400 hover:text-amber-300 underline underline-offset-2" />
               . Provided as-is, with no warranty.
             </p>
+            <p className="text-xs text-zinc-500">
+              Built by Lloyd Rowe, founding engineer at Ask the Forge.
+            </p>
             <AskTheForgeLink className="self-start text-xs text-amber-400 hover:text-amber-300 border border-amber-500/30 rounded px-2 py-1">
               ⚒ Visit asktheforge.com
             </AskTheForgeLink>
