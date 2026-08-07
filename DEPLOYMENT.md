@@ -199,6 +199,16 @@ Notarization also matters for **auto-update**: the updater replaces the `.app`
 bundle in place, and an unsigned replacement can trip Gatekeeper on the next
 launch. If you ship to Mac users at any scale, budget for the certificate.
 
+> **The disk image needs notarizing separately.** Tauri notarizes and staples
+> the `.app`, then wraps it in a `.dmg` it never submits. Gatekeeper assesses
+> the *`.dmg`* the user downloaded, so it still refuses to open — "Apple cannot
+> check it for malicious software" — while the app inside is perfectly clean.
+> v0.3.0 shipped that way before it was caught. The **Notarize and staple the
+> disk image** step in the release workflow submits the `.dmg`, staples the
+> ticket, asserts `spctl --assess --type open` passes, and replaces the copy
+> `tauri-action` uploaded. Only the `.dmg` is swapped — the updater reads
+> `.app.tar.gz` on macOS, so `latest.json` and its signatures are untouched.
+
 ---
 
 ## Prerequisites (build machine / CI)
@@ -253,11 +263,18 @@ macOS:
   the same pair.
 - **SmartScreen warning on first install.** Expected for an unsigned (no
   Authenticode) installer — dismiss it, or add a code-signing cert (above).
-- **macOS: "SoqlForge is damaged and can't be opened."** Not a corrupt
-  download — it's Gatekeeper refusing an unsigned app that arrived with the
-  quarantine attribute. Clear it with
-  `xattr -dr com.apple.quarantine /Applications/SoqlForge.app`, or set up
-  Developer ID signing (above) so users never see it.
+- **macOS: "SoqlForge is damaged" / "Apple cannot check it for malicious
+  software."** Gatekeeper refusing something that arrived quarantined and isn't
+  notarized. On a released build this shouldn't happen — check the artifact
+  itself before assuming the user is wrong:
+  ```bash
+  spctl --assess --type open --context context:primary-signature -vv SoqlForge_*.dmg
+  ```
+  `accepted / source=Notarized Developer ID` means the download is fine.
+  `rejected / source=Unnotarized Developer ID` means the disk-image
+  notarization step didn't run — check the macOS job's log. For a local
+  unsigned build, `xattr -dr com.apple.quarantine /Applications/SoqlForge.app`
+  is the expected workaround.
 - **A release is missing one platform's assets or updater entry.** Check
   whether a matrix job failed — `fail-fast: false` means the others still
   publish. Re-running just the failed job appends to the same draft release;

@@ -49,15 +49,15 @@ Or use the staging scripts, which build and copy the artifacts into
 `dist-release/<version>/`: `scripts/release.ps1` on Windows,
 `scripts/release.sh` on macOS.
 
-> **macOS Gatekeeper.** Local builds and CI builds are unsigned unless an Apple
-> signing identity is configured, so macOS quarantines the app when it arrives
-> from anywhere but your own machine. Clear it once after installing:
+> **macOS Gatekeeper.** Released `.dmg`s are signed and notarized, so they open
+> normally — nothing extra to do. A **local** `tauri build` is unsigned, so
+> macOS quarantines it if it reaches another machine. Clear it there with:
 >
 > ```bash
 > xattr -dr com.apple.quarantine /Applications/SoqlForge.app
 > ```
 >
-> See [`DEPLOYMENT.md`](./DEPLOYMENT.md) to set up signing and skip this.
+> See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for the signing setup CI uses.
 
 ## Releasing + auto-update
 

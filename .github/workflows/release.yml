@@ -186,6 +186,54 @@ jobs:
           spctl --assess --type exec -vv "$APP" 2>&1 \
             || echo "::warning::Gatekeeper assessment failed — signed but likely not notarized."
 
+      # Tauri notarizes and staples the .app, then wraps it in a .dmg it never
+      # notarizes. Gatekeeper assesses the .dmg the user downloads, so it still
+      # refuses to open it — "Apple cannot check it for malicious software" —
+      # even though the app inside is perfectly clean. Notarize the disk image
+      # too, then replace the copy tauri-action already uploaded.
+      #
+      # Only the .dmg is swapped. The updater reads .app.tar.gz on macOS, so
+      # latest.json and its signatures are untouched by this.
+      - name: Notarize and staple the disk image
+        if: startsWith(matrix.platform, 'macos') && steps.signing.outputs.expected == 'signed'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::warning::No notarization credentials — leaving the .dmg signed but un-notarized."
+            exit 0
+          fi
+
+          DMG=$(find src-tauri/target -name '*.dmg' -path '*/bundle/dmg/*' | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::no .dmg found under src-tauri/target"
+            exit 1
+          fi
+          echo "notarizing $(basename "$DMG")"
+
+          # --wait blocks until Apple returns a verdict and exits non-zero if
+          # the submission is rejected.
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_PASSWORD" \
+            --wait
+
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+          # The check that actually reflects the user's experience. If this
+          # fails the release stops here rather than shipping a .dmg that
+          # Gatekeeper will block.
+          spctl --assess --type open --context context:primary-signature -vv "$DMG"
+
+          gh release upload "${{ github.ref_name }}" "$DMG" --clobber
+          echo "replaced $(basename "$DMG") with the stapled copy"
+
   publish:
     needs: build
     runs-on: ubuntu-latest
