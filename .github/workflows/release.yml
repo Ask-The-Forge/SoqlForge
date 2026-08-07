@@ -100,7 +100,20 @@ jobs:
             echo "::error::APPLE_CERTIFICATE decoded to $SIZE bytes — too small to be a .p12. Re-run the base64 step."
             exit 1
           fi
-          if ! openssl pkcs12 -in /tmp/cert.p12 -noout -passin env:CERT_PASSWORD 2>/dev/null; then
+          # Check the PASSWORD, not whether openssl can decrypt the contents.
+          #
+          # Keychain Access exports .p12 files encrypted with RC2-40-CBC, which
+          # OpenSSL 3 moved into its legacy provider — so `openssl pkcs12` fails
+          # on a perfectly valid certificate with an "unsupported algorithm"
+          # error that has nothing to do with the password. Only a MAC
+          # verification failure actually means the password is wrong, and that
+          # check runs before any content decryption, so it's reliable on every
+          # openssl build. `security import` (what tauri-action uses to install
+          # the cert) handles RC2 natively and is unaffected either way.
+          CHECK=$(openssl pkcs12 -in /tmp/cert.p12 -noout -passin env:CERT_PASSWORD -legacy 2>&1) \
+            || CHECK=$(openssl pkcs12 -in /tmp/cert.p12 -noout -passin env:CERT_PASSWORD 2>&1) \
+            || true
+          if printf '%s' "$CHECK" | grep -qi 'mac verify'; then
             echo "::error::APPLE_CERTIFICATE won't open with APPLE_CERTIFICATE_PASSWORD — one of the two is wrong."
             exit 1
           fi
