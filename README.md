@@ -139,4 +139,6 @@ renamed to "SOQLNav", and is now "SoqlForge". The repo directory
 
 Free, open-source tools for the Salesforce community.
 
+Built by **Lloyd Rowe**, founding engineer at Ask the Forge.
+
 </div>
