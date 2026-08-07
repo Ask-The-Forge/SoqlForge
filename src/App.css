@@ -75,7 +75,11 @@ html.theme-light .bg-zinc-900 { background-color: #f4f4f5 !important; }
 html.theme-light .bg-zinc-800 { background-color: #e4e4e7 !important; }
 html.theme-light .bg-zinc-900\/40 { background-color: rgba(244, 244, 245, 0.4) !important; }
 html.theme-light .bg-zinc-900\/60 { background-color: rgba(244, 244, 245, 0.6) !important; }
+html.theme-light .bg-zinc-900\/90 { background-color: rgba(244, 244, 245, 0.93) !important; }
 html.theme-light .bg-zinc-800\/50 { background-color: rgba(228, 228, 231, 0.5) !important; }
+/* Button hover fill. Without this the hovered surface goes DARK while its
+   text stays dark (text-zinc-* is inverted above) — unreadable. */
+html.theme-light .hover\:bg-zinc-700:hover { background-color: #d4d4d8 !important; }
 
 /* Odd/even row striping in the grid */
 html.theme-light .odd\:bg-zinc-950:nth-child(odd) {
