@@ -482,8 +482,19 @@ async function soqlCompletion(
   return {
     from: word.from,
     options: top,
+    // We score and order the options ourselves (fuzzyScore above), so
+    // CodeMirror must not re-filter them.
     filter: false,
-    validFor: /^[\w]*$/,
+    // NO `validFor` here — deliberately. `validFor` tells CodeMirror it may
+    // keep this result and skip re-querying the source while the typed text
+    // still matches, relying on ITS filter to narrow the list. With
+    // `filter: false` there is no such filter, so the popup would freeze on
+    // whatever the first keystroke produced: typing "Loop__DDP_DDP" kept
+    // showing Lead / ListView / Location — the matches for "L".
+    // CodeMirror documents the pairing as invalid ("validFor must not be
+    // given when filter is false, because it only works when filtering").
+    // Re-running per keystroke is cheap: every pool comes from an in-memory
+    // cache.
   };
 }
 
