@@ -2,8 +2,9 @@
  * CSV exporter. RFC 4180 quoting: double internal quotes, wrap any field
  * containing comma / quote / newline. Booleans → "true"/"false". Null → "".
  *
- * Flattens dot-notation paths from relationship lookups by walking the object
- * for each column path (e.g. "Account.Name" → record.Account?.Name).
+ * Flattens dot-notation paths from relationship lookups for each column path
+ * (e.g. "Account.Name"), handling BOTH record shapes the two query paths
+ * produce — see `flattenValue`.
  *
  * Complex nested values (subquery results, unflattened relationship objects)
  * are reduced to readable text instead of `[object Object]`:
@@ -14,7 +15,32 @@
  *   - array → "[N items]" with a few values inlined
  */
 
+/**
+ * Read `path` (possibly dotted, e.g. "Account.Owner.Name") out of a record.
+ *
+ * The two query paths return relationship fields in *different shapes*, and
+ * this accessor has to serve both:
+ *
+ *   REST (`sf data query`)        nested SObjects, one level per segment
+ *     { Account: { Name: "Acme", Owner: { Name: "Ada" } } }
+ *
+ *   Bulk (`sf data export bulk`)  flat keys that literally contain dots,
+ *                                 because Bulk API v2 is CSV underneath and
+ *                                 its headers are the dotted field paths
+ *     { "Account.Name": "Acme", "Account.Owner.Name": "Ada" }
+ *
+ * So: try the whole path as a literal key first, then fall back to walking
+ * segment by segment. Checking the literal key first is unambiguous — a
+ * top-level SObject field name can never contain a dot, so a key equal to the
+ * full dotted path only ever comes from the Bulk shape.
+ *
+ * Without the literal-key branch, every relationship column renders blank
+ * whenever the Bulk checkbox is on.
+ */
 export function flattenValue(record: Record<string, unknown>, path: string): unknown {
+  if (record && typeof record === "object" && path in record) {
+    return record[path];
+  }
   const parts = path.split(".");
   let cur: unknown = record;
   for (const p of parts) {
