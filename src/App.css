@@ -122,14 +122,39 @@ html.theme-light .border-amber-900\/40 { border-color: rgba(217, 119, 6, 0.4) !i
 html.theme-light .text-amber-200 { color: #92400e !important; }
 html.theme-light .text-amber-300 { color: #b45309 !important; }
 html.theme-light .text-amber-400 { color: #b45309 !important; }
+html.theme-light .text-amber-400\/90 { color: #b45309 !important; }
+html.theme-light .text-amber-500\/80 { color: #b45309 !important; }
+html.theme-light .border-amber-500\/30 { border-color: rgba(217, 119, 6, 0.4) !important; }
+html.theme-light .hover\:text-amber-100:hover { color: #78350f !important; }
+html.theme-light .hover\:text-amber-300:hover { color: #92400e !important; }
+html.theme-light .hover\:text-amber-400:hover { color: #b45309 !important; }
 
+html.theme-light .bg-red-950\/30 { background-color: rgba(254, 226, 226, 0.6) !important; }
 html.theme-light .bg-red-950\/40 { background-color: rgba(254, 226, 226, 0.7) !important; }
 html.theme-light .border-red-900\/50 { border-color: rgba(220, 38, 38, 0.4) !important; }
 html.theme-light .text-red-300 { color: #b91c1c !important; }
 html.theme-light .text-red-400 { color: #b91c1c !important; }
+html.theme-light .hover\:text-red-100:hover { color: #7f1d1d !important; }
+html.theme-light .hover\:text-red-200:hover { color: #991b1b !important; }
+html.theme-light .hover\:text-red-300:hover { color: #991b1b !important; }
+html.theme-light .hover\:text-red-400:hover { color: #b91c1c !important; }
+
+/* No .text-blue-300/.text-blue-100 remap — those sit on bg-blue-600, which
+   stays blue in light mode. */
+html.theme-light .text-blue-400 { color: #1d4ed8 !important; }
+html.theme-light .hover\:text-blue-300:hover { color: #1e40af !important; }
+html.theme-light .hover\:text-blue-400:hover { color: #1d4ed8 !important; }
+html.theme-light .bg-blue-950\/30 { background-color: rgba(219, 234, 254, 0.7) !important; }
+html.theme-light .border-blue-900\/40 { border-color: rgba(37, 99, 235, 0.35) !important; }
+
+html.theme-light .text-emerald-300 { color: #047857 !important; }
+html.theme-light .text-emerald-400 { color: #047857 !important; }
+html.theme-light .hover\:text-emerald-100:hover { color: #064e3b !important; }
+html.theme-light .hover\:text-emerald-300:hover { color: #065f46 !important; }
 
 /* Modal backdrop a bit lighter so it's visible against a light page */
 html.theme-light .bg-black\/50 { background-color: rgba(0, 0, 0, 0.25) !important; }
+html.theme-light .bg-black\/60 { background-color: rgba(0, 0, 0, 0.25) !important; }
 
 /* CodeMirror editor — override its hardcoded dark theme in light mode.
    Syntax-highlight colors are kept (they're chosen to be visible on either
