@@ -43,6 +43,7 @@ pub fn run() {
             commands::settings::set_ai_settings,
             commands::ai::ai_generate_soql,
             commands::export::save_csv,
+            commands::export::open_saved_file,
             commands::update::update_record,
             commands::delete::delete_record,
             commands::org_manage::org_login_web,

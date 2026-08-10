@@ -47,3 +47,28 @@ pub async fn save_csv(
         path: Some(pb.to_string_lossy().into_owned()),
     })
 }
+
+/// Open a file we just saved in the OS default application.
+///
+/// Deliberately NOT the opener plugin's JS `openPath()`. That call goes through
+/// the plugin's IPC command, which validates the path against the plugin's
+/// scope — and `opener:allow-open-path` grants the command, in its own words,
+/// "without any pre-configured scope". With no path entries in the scope,
+/// `is_path_allowed` is always false and every call failed with
+/// `ForbiddenPath`, so the Export CSV "Open" button did nothing at all.
+/// (`openUrl` is unaffected: `opener:default` pulls in `allow-default-urls`,
+/// which DOES ship `http://*` / `https://*` scope entries — which is why the
+/// "Object Setup" and per-row record links work.)
+///
+/// Granting a path scope instead isn't practical: the path is whatever the user
+/// picked in the native save dialog, so it can live on any volume, and the glob
+/// would have to be written per-platform. The Rust-side API carries no scope
+/// check, and the only paths that reach it are ones `save_csv` just wrote.
+#[tauri::command]
+pub async fn open_saved_file(path: String) -> Result<(), AppError> {
+    // The free function (unlike `Opener::open_path`) stats the path first, so a
+    // file that has since been moved or deleted reports that plainly instead of
+    // failing somewhere inside the OS handler.
+    tauri_plugin_opener::open_path(&path, None::<&str>)
+        .map_err(|e| AppError::Io(format!("open {path}: {e}")))
+}

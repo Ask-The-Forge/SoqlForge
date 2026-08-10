@@ -37,11 +37,12 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   deleteRecord,
   type FieldInfo,
+  openSavedFile,
   type QueryResult,
   saveCsv,
   toAppError,
@@ -736,7 +737,13 @@ function RowsGrid({
               </span>
               <button
                 onClick={() => {
-                  if (exportSaved) void openPath(exportSaved);
+                  if (!exportSaved) return;
+                  // Report failures instead of dropping them: a rejected
+                  // promise here used to be swallowed, so the button looked
+                  // dead rather than broken.
+                  void openSavedFile(exportSaved).catch((e) =>
+                    setActionError(`Open failed: ${toAppError(e).message}`),
+                  );
                 }}
                 className="text-emerald-300 hover:text-emerald-100 border border-emerald-800 hover:border-emerald-600 rounded px-2 py-0.5 whitespace-nowrap"
                 title="Open the saved file in the OS default app"

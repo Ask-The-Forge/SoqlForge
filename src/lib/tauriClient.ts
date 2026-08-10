@@ -292,6 +292,18 @@ export async function saveCsv(
   return SaveResultSchema.parse(raw);
 }
 
+/**
+ * Open a previously-saved export in the OS default application.
+ *
+ * Goes through our own Tauri command rather than the opener plugin's
+ * `openPath()` — see `open_saved_file` in src-tauri/src/commands/export.rs for
+ * why that one can never succeed. Rejects with an AppError if the file has
+ * moved or no handler is registered, so callers should surface the failure.
+ */
+export async function openSavedFile(path: string): Promise<void> {
+  await invoke("open_saved_file", { path });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AI assist
 // ─────────────────────────────────────────────────────────────────────────────
