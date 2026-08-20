@@ -2,15 +2,17 @@
  * QueryEditor — CodeMirror 6 SOQL editor (minimal).
  *
  * Intentionally stripped to a small set of extensions while we hunt a
- * WebView2-renderer-freeze. Things deliberately omitted for now: autocomplete,
- * bracket matching, close brackets, search, drawSelection, indentOnInput.
- * Re-add once the baseline is verified stable.
+ * WebView2-renderer-freeze. Things deliberately omitted for now: bracket
+ * matching, close brackets, search, drawSelection, indentOnInput.
+ * Re-add once the baseline is verified stable. (Autocomplete came back via
+ * soqlLanguage(); Tab or Enter accepts the highlighted suggestion.)
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { acceptCompletion } from "@codemirror/autocomplete";
 import {
   HighlightStyle,
   syntaxHighlighting,
@@ -169,13 +171,15 @@ export function QueryEditor({ query, onOpenSettings }: QueryEditorProps) {
         soqlLanguage(),
         // ghostPrediction's StateField + ghost-text decoration
         ...ghostPrediction,
-        // Tab handler must come BEFORE defaultKeymap so it gets first crack
-        // at the Tab key; falls through (returns false) when there's no
-        // ghost to accept.
+        // Tab is claimed twice, in priority order: an open autocomplete popup
+        // wins (accept the highlighted suggestion), then the inline ghost
+        // prediction. Each returns false when it has nothing to accept, so
+        // Tab falls through cleanly when neither is showing.
         keymap.of([
           { key: "Ctrl-Enter", run: runFromKeymap, preventDefault: true },
           { key: "Cmd-Enter", run: runFromKeymap, preventDefault: true },
           { key: "F5", run: runFromKeymap, preventDefault: true },
+          { key: "Tab", run: acceptCompletion },
           ...ghostPredictionKeymap,
           ...defaultKeymap,
           ...historyKeymap,

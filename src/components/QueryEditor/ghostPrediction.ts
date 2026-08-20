@@ -18,7 +18,9 @@
  *
  * Coexistence: the autocomplete popup still appears alongside the ghost. The
  * ghost is a hint for the obvious continuation; the popup is the chooser.
- * Tab accepts the ghost; arrow keys / Enter still drive the popup.
+ * While the popup is open, Tab/Enter accept its highlighted entry (the editor
+ * keymap gives acceptCompletion first crack at Tab); the ghost's Tab binding
+ * only fires once the popup is closed.
  */
 
 import { EditorState, StateField } from "@codemirror/state";
@@ -30,7 +32,7 @@ import {
   WidgetType,
 } from "@codemirror/view";
 
-import { getCurrentObjects } from "../../lib/schemaCache";
+import { getCurrentObjects, objectRank } from "../../lib/schemaCache";
 
 interface Prediction {
   /** Inclusive start of the range to replace on accept. */
@@ -109,9 +111,12 @@ function computePrediction(state: EditorState): Prediction | null {
       o.name.toLowerCase().startsWith(partial.toLowerCase()),
     );
     if (matches.length > 0) {
-      // Prefer: standard > custom, then shorter name, then alpha.
+      // Same tiering the dropdown uses — custom, then standard, then the
+      // generated companions — with the shortest name winning inside a tier
+      // (typing "Acc" should land on Account, not AccountContactRelation).
       matches.sort((a, b) => {
-        if (a.custom !== b.custom) return a.custom ? 1 : -1;
+        const byRank = objectRank(b) - objectRank(a);
+        if (byRank !== 0) return byRank;
         return a.name.length - b.name.length || a.name.localeCompare(b.name);
       });
       const best = matches[0];

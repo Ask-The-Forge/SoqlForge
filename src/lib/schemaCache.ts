@@ -231,6 +231,49 @@ export function getFieldsForChildRelationship(
   return [];
 }
 
+/** Suffixes Salesforce puts on the companion objects it generates for you —
+ *  AccountHistory, AccountShare, AccountFeed, AccountChangeEvent, and the
+ *  `Foo__History` / `Foo__Share` equivalents for custom objects. They flood
+ *  any prefix search and are almost never what someone is reaching for. */
+const DERIVED_OBJECT_SUFFIXES = [
+  "History",
+  "Share",
+  "Feed",
+  "ChangeEvent",
+  "Tag",
+  "OwnerSharingRule",
+  "CriteriaBasedSharingRule",
+];
+
+/** True for an auto-generated companion object. The length guard keeps a real
+ *  object literally named `Tag` or `Share` out of it. Suffix matching does
+ *  catch a few genuine objects (LoginHistory) — they're demoted, never
+ *  hidden, which is the right trade for un-flooding every prefix search. */
+export function isDerivedObject(name: string): boolean {
+  return DERIVED_OBJECT_SUFFIXES.some(
+    (suffix) => name.length > suffix.length && name.endsWith(suffix),
+  );
+}
+
+/** How strongly to suggest an object: 2 = custom, 1 = standard, 0 = derived
+ *  companion. Custom objects lead because that's what people actually query
+ *  in their own org; the companions sort to the bottom regardless of whether
+ *  they're custom. */
+export function objectRank(o: ObjectInfo): number {
+  if (isDerivedObject(o.name)) return 0;
+  return o.custom ? 2 : 1;
+}
+
+/** Rank-then-alphabetical comparator, shared by every place that offers a
+ *  list of objects so they all agree on what "most relevant" means. */
+export function compareObjectsForSuggestion(
+  a: ObjectInfo,
+  b: ObjectInfo,
+): number {
+  const byRank = objectRank(b) - objectRank(a);
+  return byRank !== 0 ? byRank : a.name.localeCompare(b.name);
+}
+
 /**
  * Given a path of relationship names rooted at `rootObject`, resolve to the
  * final target SObject name. Returns null if any segment isn't a known

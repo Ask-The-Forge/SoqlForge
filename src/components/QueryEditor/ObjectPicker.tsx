@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import {
   clearObjectsFailure,
+  compareObjectsForSuggestion,
   getCachedFields,
   loadFields,
   loadObjectsFor,
@@ -118,9 +119,11 @@ export function ObjectPicker({
 
   const filtered = useMemo(() => {
     const f = filter.trim().toLowerCase();
-    // Stable A→Z order. Custom objects intermingled (they sort under "C…"
-    // by their *full* name, which is normal Salesforce behavior).
-    const sorted = [...objects].sort((a, b) => a.name.localeCompare(b.name));
+    // Custom objects first, then standard, then the auto-generated companions
+    // (AccountHistory, AccountShare, …); A→Z inside each tier. Matters most
+    // under the MAX_ROWS cap, where the companions would otherwise push the
+    // objects you actually query off the end of the list.
+    const sorted = [...objects].sort(compareObjectsForSuggestion);
     if (!f) return sorted.slice(0, MAX_ROWS);
     // Substring filter. Cap to MAX_ROWS so a giant org doesn't blow up DOM.
     return sorted.filter((o) => o.name.toLowerCase().includes(f)).slice(0, MAX_ROWS);

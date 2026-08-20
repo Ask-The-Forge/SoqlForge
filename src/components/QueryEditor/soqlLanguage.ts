@@ -42,7 +42,9 @@ import {
   getCurrentObjects,
   getCurrentOrg,
   getFieldsForChildRelationship,
+  isDerivedObject,
   loadFieldsForRelationship,
+  objectRank,
   resolveChildRelationship,
 } from "../../lib/schemaCache";
 import type { FieldInfo } from "../../lib/tauriClient";
@@ -218,6 +220,12 @@ function cursorScope(fullText: string, cursorPos: number): CursorScope {
   return { object: target, fields };
 }
 
+/** Boost applied to an object suggestion, indexed by `objectRank`: generated
+ *  companions drop far enough to clear the real matches, custom objects edge
+ *  ahead of standard ones. Standard keeps the caller's boost unchanged, so
+ *  objects rank against the other completion kinds exactly as before. */
+const OBJECT_BOOST_BY_RANK = [-8, 0, 2];
+
 function poolFor(
   ctx: ContextKind,
   fullText: string,
@@ -235,12 +243,21 @@ function poolFor(
       boost,
     }));
 
+  // Custom objects lead (that's what people query in their own org), the
+  // auto-generated companions — AccountHistory, AccountShare, … — sink well
+  // below both so they stop crowding out real matches for a short prefix.
   const objectOpts = (boost = 10): Completion[] =>
     objects.map((o) => ({
       label: o.name,
       type: "class",
-      detail: o.custom ? "custom" : "standard",
-      boost: o.custom ? boost - 2 : boost,
+      detail: isDerivedObject(o.name)
+        ? o.custom
+          ? "custom (generated)"
+          : "generated"
+        : o.custom
+          ? "custom"
+          : "standard",
+      boost: boost + OBJECT_BOOST_BY_RANK[objectRank(o)],
     }));
 
   switch (ctx) {
