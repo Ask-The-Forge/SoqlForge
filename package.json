@@ -2,7 +2,7 @@
   "name": "soqlforge",
   "private": true,
   "license": "MIT",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
