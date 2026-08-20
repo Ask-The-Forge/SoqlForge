@@ -161,7 +161,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </span>
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-zinc-300">Query timeout (seconds)</span>
+              <span className="text-zinc-300">CLI timeout (seconds)</span>
               <input
                 type="number"
                 min={5}
@@ -176,6 +176,11 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 disabled={!loaded}
                 className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-100 w-24"
               />
+              <span className="text-xs text-zinc-500">
+                Applies to quick CLI calls (org list, describes). Query runs
+                get up to 10 minutes regardless — use Cancel to stop one
+                early.
+              </span>
             </label>
             <div className="flex items-center gap-2 mt-1">
               <button

@@ -152,27 +152,35 @@ function guardFormula(s: string): string {
   return s;
 }
 
-export function buildCsv(
-  records: Record<string, unknown>[],
+/**
+ * The CSV header line, prefixed with a UTF-8 BOM so the file opens cleanly in
+ * Excel/Numbers/Sheets without encoding fuss. A full export is this plus
+ * `"\r\n" + csvRowLines(chunk, columns)` per chunk of records — chunked so
+ * six-figure row counts never materialize as a single giant string (that
+ * OOM'd the WebView, both as the JS string and again inside the IPC message).
+ */
+export function csvHeaderLine(
   columns: string[],
   /** Optional pretty header per column (e.g. "COUNT(Id)" for key "expr0").
    *  Falls back to the column key. */
   headerLabels?: Map<string, string>,
 ): string {
-  const lines: string[] = [];
-  lines.push(
-    columns.map((c) => escape(headerLabels?.get(c) ?? c)).join(","),
-  );
-  for (const rec of records) {
-    lines.push(
+  return "﻿" + columns.map((c) => escape(headerLabels?.get(c) ?? c)).join(",");
+}
+
+/** Serialize a batch of records as CSV lines joined with Excel-friendly \r\n
+ *  (no leading or trailing newline). */
+export function csvRowLines(
+  records: Record<string, unknown>[],
+  columns: string[],
+): string {
+  return records
+    .map((rec) =>
       columns
         .map((col) => escape(guardFormula(csvCell(flattenValue(rec, col)))))
         .join(","),
-    );
-  }
-  // Prepend UTF-8 BOM + Excel-friendly newlines so the file opens cleanly in
-  // Excel/Numbers/Sheets without encoding fuss.
-  return "﻿" + lines.join("\r\n");
+    )
+    .join("\r\n");
 }
 
 /**

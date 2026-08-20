@@ -21,6 +21,11 @@ pub struct QueryOptions {
     /// Include soft-deleted / archived records (`--all-rows` flag — uses
     /// `queryAll` instead of `query`).
     pub all_rows: bool,
+    /// Raise the CLI's REST row cap (default 10,000) so `sf data query`
+    /// auto-fetches every page up to this many records. Used by the
+    /// "fetch all rows before exporting" path. Ignored for Bulk — that path
+    /// always returns the complete result.
+    pub max_rows: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +44,14 @@ pub struct QueryResult {
 /// real-world queries; users can re-run via the CLI directly for anything
 /// larger.
 const BULK_WAIT_MINUTES: u32 = 10;
+
+/// Deadline for REST query runs. Deliberately NOT the configurable CLI
+/// timeout (default 30s): that guards the quick administrative calls
+/// (org list, describes), while a query run is interactive — the UI shows a
+/// live elapsed counter and a working Cancel button — so a patient deadline
+/// costs nothing. All-Rows scans and multi-page fetches routinely need
+/// minutes. Matches the bulk allowance.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(BULK_WAIT_MINUTES as u64 * 60);
 
 #[tauri::command]
 pub async fn run_soql(
@@ -106,7 +119,16 @@ pub async fn run_soql(
         args.push("--all-rows");
     }
 
-    let result = run_sf_json_cancellable(&args, None, run_id.as_deref()).await;
+    // The CLI caps REST queries at org-max-query-limit (10k by default) and
+    // returns a partial result beyond that. The env override is the supported
+    // way to raise the cap per-invocation.
+    let mut envs: Vec<(&str, String)> = Vec::new();
+    if let Some(n) = opts.max_rows {
+        envs.push(("SF_ORG_MAX_QUERY_LIMIT", n.to_string()));
+    }
+
+    let result =
+        run_sf_json_cancellable(&args, Some(QUERY_TIMEOUT), run_id.as_deref(), &envs).await;
     if let Some(p) = &query_file {
         let _ = std::fs::remove_file(p);
     }
@@ -222,7 +244,7 @@ async fn run_soql_bulk(
     // sf to return after the job completes.
     let call_timeout = Some(Duration::from_secs((BULK_WAIT_MINUTES as u64 * 60) + 30));
 
-    let run_result = run_sf_json_cancellable(&args, call_timeout, run_id).await;
+    let run_result = run_sf_json_cancellable(&args, call_timeout, run_id, &[]).await;
     if let Some(p) = &query_file {
         let _ = std::fs::remove_file(p);
     }

@@ -36,13 +36,52 @@ export interface HistoryEntry {
   org?: string;
 }
 
+/** Collapse duplicate history entries, keeping the FIRST occurrence of each
+ *  query (the list is newest-first, so that's the most recent run).
+ *
+ *  Identity is query text + API mode. Org is deliberately NOT part of the key:
+ *  it's a label on the entry, not a different query, so re-running the same
+ *  SOQL against another org moves the existing row instead of cloning it.
+ *
+ *  Runs on push and on hydration — the latter cleans up histories written by
+ *  builds that only deduped against the newest entry. Tolerates junk entries
+ *  from a corrupted blob by dropping them; `merge` must never throw. */
+function dedupeHistory(list: HistoryEntry[]): HistoryEntry[] {
+  const seen = new Set<string>();
+  const out: HistoryEntry[] = [];
+  for (const h of list) {
+    if (!h || typeof h.query !== "string") continue;
+    const key = `${h.useToolingApi ? "T" : "R"}\u0000${h.query}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(h);
+  }
+  return out;
+}
+
 /** Provenance of a query result — captured when the run completes so the
- *  edit path targets what actually produced the rows, not whatever the
- *  editor text says now. */
+ *  edit path (and the "fetch all rows" re-run) targets what actually produced
+ *  the rows, not whatever the editor text says now. */
 export interface ResultContext {
   org: string;
   objectName: string | null;
   useToolingApi: boolean;
+  /** queryAll (soft-deleted/archived rows included) — must match on re-run. */
+  allRows: boolean;
+}
+
+/** Scalar a cell edit can produce — matches CellEditor's CommitValue and the
+ *  value type `sf data update record` accepts. */
+export type PendingValue = string | number | boolean | null;
+
+/** Staged batch edits: record Id → { FieldApiName: new value }. Keyed by Id
+ *  (not row index) so sorts and row deletes can't misattribute an edit. */
+export type PendingEdits = Record<string, Record<string, PendingValue>>;
+
+/** Total staged field edits across a tab's pending set. */
+export function countPendingEdits(pending: PendingEdits | null | undefined): number {
+  if (!pending) return 0;
+  return Object.values(pending).reduce((n, fields) => n + Object.keys(fields).length, 0);
 }
 
 export interface SavedQuery {
@@ -75,6 +114,11 @@ export interface Tab {
   result: QueryResult | null;
   lastRanQuery: string | null;
   resultContext: ResultContext | null;
+  /** Batch-mode edits staged against this tab's result, not yet written to
+   *  the org. Lives on the tab (not in the grid component) so switching tabs
+   *  doesn't drop them. Deliberately NOT persisted — they reference records
+   *  of a result that doesn't survive a relaunch either. */
+  pendingEdits: PendingEdits | null;
 }
 
 interface AppState {
@@ -123,9 +167,32 @@ interface AppState {
     fieldName: string,
     value: unknown,
   ) => void;
+  /** Patch several fields of one record at once — the batch-save path
+   *  commits a whole record's staged edits with one store write. */
+  updateTabRecordFields: (
+    tabId: string,
+    rowIdx: number,
+    values: Record<string, PendingValue>,
+  ) => void;
   /** Drop a record from the active tab's result after it was deleted in the
    *  org — keeps the grid honest without forcing a re-run. */
   deleteTabRecord: (tabId: string, rowIdx: number) => void;
+
+  // ── Batch editing ──────────────────────────────────────────────────────
+  /** When true, cell edits stage into `pendingEdits` instead of writing to
+   *  the org immediately; a Save all button commits them together. */
+  batchEdit: boolean;
+  setBatchEdit: (b: boolean) => void;
+  /** Stage one field edit against a record of the tab's current result. */
+  setPendingEdit: (
+    tabId: string,
+    recordId: string,
+    field: string,
+    value: PendingValue,
+  ) => void;
+  /** Remove staged edits at three granularities: one field (`recordId` +
+   *  `field`), one record (`recordId` only), or everything (neither). */
+  clearPendingEdits: (tabId: string, recordId?: string, field?: string) => void;
 
   theme: "dark" | "light";
   setTheme: (t: "dark" | "light") => void;
@@ -152,6 +219,7 @@ function freshTab(overrides: Partial<Tab> = {}): Tab {
     result: null,
     lastRanQuery: null,
     resultContext: null,
+    pendingEdits: null,
   };
 }
 
@@ -171,17 +239,11 @@ export const useAppStore = create<AppState>()(
 
       history: [],
       pushHistory: (entry) =>
-        set((s) => {
-          const prev = s.history[0];
-          if (
-            prev &&
-            prev.query === entry.query &&
-            prev.useToolingApi === entry.useToolingApi
-          ) {
-            return { history: [{ ...prev, ts: entry.ts }, ...s.history.slice(1)] };
-          }
-          return { history: [entry, ...s.history].slice(0, HISTORY_LIMIT) };
-        }),
+        // New entry goes in front and wins the dedupe, so the row carries the
+        // latest run's timestamp and org wherever the query sat before.
+        set((s) => ({
+          history: dedupeHistory([entry, ...s.history]).slice(0, HISTORY_LIMIT),
+        })),
       clearHistory: () => set({ history: [] }),
 
       savedQueries: [],
@@ -251,14 +313,37 @@ export const useAppStore = create<AppState>()(
             return { ...t, result: { ...t.result, records } };
           }),
         })),
+      updateTabRecordFields: (tabId, rowIdx, values) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            if (t.id !== tabId || !t.result) return t;
+            const records = t.result.records.slice();
+            if (rowIdx < 0 || rowIdx >= records.length) return t;
+            records[rowIdx] = { ...records[rowIdx], ...values };
+            return { ...t, result: { ...t.result, records } };
+          }),
+        })),
       deleteTabRecord: (tabId, rowIdx) =>
         set((s) => ({
           tabs: s.tabs.map((t) => {
             if (t.id !== tabId || !t.result) return t;
             if (rowIdx < 0 || rowIdx >= t.result.records.length) return t;
+            // A deleted record's staged batch edits die with it — they'd
+            // otherwise save against a record that no longer exists.
+            const deletedId = t.result.records[rowIdx]?.Id;
+            let pendingEdits = t.pendingEdits;
+            if (
+              typeof deletedId === "string" &&
+              pendingEdits &&
+              deletedId in pendingEdits
+            ) {
+              const { [deletedId]: _dropped, ...rest } = pendingEdits;
+              pendingEdits = Object.keys(rest).length ? rest : null;
+            }
             const records = t.result.records.filter((_, i) => i !== rowIdx);
             return {
               ...t,
+              pendingEdits,
               result: {
                 ...t.result,
                 records,
@@ -267,6 +352,48 @@ export const useAppStore = create<AppState>()(
                 totalSize: Math.max(records.length, t.result.totalSize - 1),
               },
             };
+          }),
+        })),
+
+      batchEdit: false,
+      setBatchEdit: (batchEdit) => set({ batchEdit }),
+      setPendingEdit: (tabId, recordId, field, value) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            if (t.id !== tabId) return t;
+            const cur = t.pendingEdits ?? {};
+            return {
+              ...t,
+              pendingEdits: {
+                ...cur,
+                [recordId]: { ...(cur[recordId] ?? {}), [field]: value },
+              },
+            };
+          }),
+        })),
+      clearPendingEdits: (tabId, recordId, field) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            if (t.id !== tabId || !t.pendingEdits) return t;
+            if (recordId === undefined) {
+              return { ...t, pendingEdits: null };
+            }
+            const forRecord = t.pendingEdits[recordId];
+            if (!forRecord) return t;
+            let next: PendingEdits | null;
+            if (field === undefined) {
+              const { [recordId]: _record, ...rest } = t.pendingEdits;
+              next = Object.keys(rest).length ? rest : null;
+            } else {
+              const { [field]: _field, ...restFields } = forRecord;
+              if (Object.keys(restFields).length) {
+                next = { ...t.pendingEdits, [recordId]: restFields };
+              } else {
+                const { [recordId]: _record, ...rest } = t.pendingEdits;
+                next = Object.keys(rest).length ? rest : null;
+              }
+            }
+            return { ...t, pendingEdits: next };
           }),
         })),
 
@@ -310,6 +437,7 @@ export const useAppStore = create<AppState>()(
         activeTabId: s.activeTabId,
         theme: s.theme,
         fontSize: s.fontSize,
+        batchEdit: s.batchEdit,
       }),
       merge: (persisted, current) => {
         // Re-hydrate persisted tabs with fresh transient fields. Defensive:
@@ -333,7 +461,7 @@ export const useAppStore = create<AppState>()(
               ? incoming.activeTabId
               : tabs[0].id;
           const history = Array.isArray(incoming.history)
-            ? incoming.history
+            ? dedupeHistory(incoming.history)
             : current.history;
           const savedQueries = Array.isArray(incoming.savedQueries)
             ? incoming.savedQueries

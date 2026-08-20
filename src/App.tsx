@@ -23,6 +23,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [orgManagerOpen, setOrgManagerOpen] = useState(false);
   const theme = useAppStore((s) => s.theme);
+  const addTab = useAppStore((s) => s.addTab);
 
   // Reflect the store's theme into a class on <html>. Light mode rules in
   // App.css key off `html.theme-light`.
@@ -109,6 +110,13 @@ function App() {
             result={query.result}
             lastRanQuery={query.lastRanQuery}
             resultContext={query.resultContext}
+            onDrillDown={(soql, tabName) => {
+              // addTab activates the new tab synchronously and `run` reads the
+              // active tab from the store at call time, so this runs the
+              // drill-down query, not the one the user was looking at.
+              addTab({ name: tabName, text: soql });
+              void query.run();
+            }}
           />
         </main>
       </div>

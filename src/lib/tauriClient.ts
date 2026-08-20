@@ -224,6 +224,9 @@ export interface QueryOptions {
   useBulkApi?: boolean;
   /** Include soft-deleted / archived records (queryAll). */
   allRows?: boolean;
+  /** Raise the REST row cap (CLI default 10k) so the query auto-fetches every
+   *  page up to this many records. Used by "fetch all rows" export. */
+  maxRows?: number;
 }
 
 export async function runSoql(
@@ -239,6 +242,7 @@ export async function runSoql(
       useToolingApi: !!options.useToolingApi,
       useBulkApi: !!options.useBulkApi,
       allRows: !!options.allRows,
+      maxRows: options.maxRows ?? null,
     },
     runId: runId ?? null,
   });
@@ -281,15 +285,38 @@ export const SaveResultSchema = z.object({
 export type SaveResult = z.infer<typeof SaveResultSchema>;
 
 /**
- * Show the native save-file dialog and write `content` to the chosen path.
- * Resolves to `{ path: null }` if the user cancelled.
+ * CSV export is a STREAM: begin (dialog + first chunk) → append × N →
+ * finish/discard. Sending the whole file as one invoke argument OOM'd the
+ * WebView on six-figure row counts, so callers must chunk.
+ *
+ * `saveCsvBegin` shows the native save-file dialog and writes `content` to
+ * the chosen path (truncating an existing file). Resolves to `{ path: null }`
+ * if the user cancelled.
  */
-export async function saveCsv(
+export async function saveCsvBegin(
   content: string,
   defaultFilename: string,
 ): Promise<SaveResult> {
-  const raw = await invoke("save_csv", { content, defaultFilename });
+  const raw = await invoke("save_csv_begin", { content, defaultFilename });
   return SaveResultSchema.parse(raw);
+}
+
+/** Append a chunk to an export started by `saveCsvBegin`. */
+export async function saveCsvAppend(
+  path: string,
+  content: string,
+): Promise<void> {
+  await invoke("save_csv_append", { path, content });
+}
+
+/** Close out a completed export — the file stays. */
+export async function saveCsvFinish(path: string): Promise<void> {
+  await invoke("save_csv_finish", { path });
+}
+
+/** Abort an in-flight export and delete the partial file. */
+export async function saveCsvDiscard(path: string): Promise<void> {
+  await invoke("save_csv_discard", { path });
 }
 
 /**

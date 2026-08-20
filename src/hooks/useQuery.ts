@@ -28,7 +28,11 @@
 import { useCallback, useEffect } from "react";
 import { cancelRun, runSoql, toAppError } from "../lib/tauriClient";
 import type { AppError, QueryResult } from "../lib/tauriClient";
-import { useAppStore, type ResultContext } from "../stores/appStore";
+import {
+  countPendingEdits,
+  useAppStore,
+  type ResultContext,
+} from "../stores/appStore";
 import { extractFromObject } from "../lib/schemaCache";
 
 export interface UseQueryResult {
@@ -57,8 +61,13 @@ export interface UseQueryResult {
 
 /** Bare `SELECT COUNT() FROM X` returns totalSize but zero records via REST,
  *  which used to render as "Query returned 0 records". Synthesize a one-row
- *  result so the count is visible in the grid (and in CSV export). */
-function adaptResult(res: QueryResult, query: string): QueryResult {
+ *  result so the count is visible in the grid (and in CSV export).
+ *
+ *  Exported because this is the ONLY way a raw `runSoql` response is allowed
+ *  to become a tab's `result` — every producer has to normalize identically,
+ *  or the grid renders one path differently from the other. The grid's
+ *  "fetch all rows" re-run is the second such producer. */
+export function adaptResult(res: QueryResult, query: string): QueryResult {
   if (
     res.records.length === 0 &&
     /^\s*SELECT\s+COUNT\s*\(\s*\)\s+FROM\b/i.test(query)
@@ -106,12 +115,21 @@ export function useQuery(): UseQueryResult {
   const tabs = useAppStore((s) => s.tabs);
   useEffect(() => {
     for (const t of tabs) {
-      if (t.result || t.error || t.lastRanQuery || t.resultContext) {
+      if (
+        t.result ||
+        t.error ||
+        t.lastRanQuery ||
+        t.resultContext ||
+        t.pendingEdits
+      ) {
         updateTab(t.id, {
           result: null,
           error: null,
           lastRanQuery: null,
           resultContext: null,
+          // Staged batch edits target records of the org we just left —
+          // they can't survive the switch any more than the result can.
+          pendingEdits: null,
         });
       }
     }
@@ -139,6 +157,22 @@ export function useQuery(): UseQueryResult {
     }
     const trimmed = tabAtRun.text.trim();
     if (!trimmed) return;
+
+    // Re-running replaces the result the staged batch edits point at — that
+    // would silently throw away typed work. Make the user resolve them first
+    // (Save all / Discard live in the results toolbar).
+    const pendingCount = countPendingEdits(tabAtRun.pendingEdits);
+    if (pendingCount > 0) {
+      updateTab(tabId, {
+        error: {
+          code: "CLI_ERROR",
+          message: `This tab has ${pendingCount} unsaved batch edit${
+            pendingCount === 1 ? "" : "s"
+          } — Save all or Discard them in the results toolbar before re-running.`,
+        },
+      });
+      return;
+    }
 
     const runId =
       typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -180,6 +214,7 @@ export function useQuery(): UseQueryResult {
           org: orgAtRun,
           objectName: extractFromObject(trimmed),
           useToolingApi: tabAtRun.useToolingApi,
+          allRows: tabAtRun.allRows,
         },
         isRunning: false,
         runId: null,

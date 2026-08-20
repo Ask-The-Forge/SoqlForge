@@ -377,7 +377,7 @@ fn strip_ansi(s: &str) -> String {
 ///   success: `{ "status": 0, "result": {...} }`
 ///   failure: `{ "status": 1, "name": "...", "message": "...", "stack": "..." }`
 pub async fn run_sf_json(args: &[&str]) -> Result<Value, AppError> {
-    run_sf_json_cancellable(args, None, None).await
+    run_sf_json_cancellable(args, None, None, &[]).await
 }
 
 /// Variant that lets a caller override the default timeout. Use this for
@@ -387,15 +387,17 @@ pub async fn run_sf_json_with_timeout(
     args: &[&str],
     timeout_override: Option<Duration>,
 ) -> Result<Value, AppError> {
-    run_sf_json_cancellable(args, timeout_override, None).await
+    run_sf_json_cancellable(args, timeout_override, None, &[]).await
 }
 
 /// Full-control variant: optional timeout override + optional run-id for
-/// cancellation (see `cancel`).
+/// cancellation (see `cancel`) + extra environment variables for the child
+/// (sf reads a fair amount of config from env, e.g. SF_ORG_MAX_QUERY_LIMIT).
 pub async fn run_sf_json_cancellable(
     args: &[&str],
     timeout_override: Option<Duration>,
     run_id: Option<&str>,
+    envs: &[(&str, String)],
 ) -> Result<Value, AppError> {
     let sf = resolve_sf()?;
     let cfg = get_config();
@@ -429,6 +431,9 @@ pub async fn run_sf_json_cancellable(
     // shim that has to locate `node` for itself, and under a Finder launch the
     // inherited PATH is too bare to do that. See SEARCH_PATH.
     cmd.env("PATH", child_path(&sf));
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     spawn_detached(&mut cmd);
 
     cmd.stdin(std::process::Stdio::null())

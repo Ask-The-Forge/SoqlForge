@@ -20,8 +20,10 @@ pub enum AppError {
     #[error("query error: {0}")]
     QueryError(String),
 
-    /// Subprocess exceeded the configured timeout (default 30s).
-    #[error("subprocess timed out")]
+    /// Subprocess exceeded its deadline — the configurable CLI timeout for
+    /// administrative calls (default 30s), or the fixed 10-minute allowance
+    /// for query runs.
+    #[error("timed out waiting for the Salesforce CLI")]
     Timeout,
 
     /// The user cancelled the run (we killed the subprocess tree).
