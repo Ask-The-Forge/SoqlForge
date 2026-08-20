@@ -190,7 +190,10 @@ mod tests {
             register_export(path(n));
         }
         assert_eq!(open_exports().len(), MAX_OPEN_EXPORTS);
-        assert!(!open_exports().contains(&path(0)), "oldest should be evicted");
+        assert!(
+            !open_exports().contains(&path(0)),
+            "oldest should be evicted"
+        );
         assert!(open_exports().contains(&path(MAX_OPEN_EXPORTS)));
 
         // unregister reports whether it actually removed something — discard
