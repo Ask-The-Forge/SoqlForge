@@ -4,14 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Callable so the release workflow can run these exact checks against the
+  # tagged commit before it builds anything. Duplicating the steps there
+  # instead would let the two drift, which defeats the point of the gate.
+  workflow_call:
 
 jobs:
   frontend:
     # Platform-agnostic (tsc + vite), so one cheap runner is enough.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -34,7 +38,7 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
