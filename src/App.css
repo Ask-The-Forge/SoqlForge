@@ -80,6 +80,10 @@ html.theme-light .bg-zinc-800\/50 { background-color: rgba(228, 228, 231, 0.5) !
 /* Button hover fill. Without this the hovered surface goes DARK while its
    text stays dark (text-zinc-* is inverted above) — unreadable. */
 html.theme-light .hover\:bg-zinc-700:hover { background-color: #d4d4d8 !important; }
+/* Same trap, unsuffixed: the cell context menu hovers its items with a bare
+   `hover:bg-zinc-800`. The `/50` variant above is remapped but this one wasn't,
+   so a hovered menu item went near-black under text inverted to near-black. */
+html.theme-light .hover\:bg-zinc-800:hover { background-color: #e4e4e7 !important; }
 
 /* Odd/even row striping in the grid */
 html.theme-light .odd\:bg-zinc-950:nth-child(odd) {
@@ -96,10 +100,13 @@ html.theme-light .hover\:bg-zinc-900:hover {
 }
 
 /* Borders */
+html.theme-light .border-zinc-600 { border-color: #a1a1aa !important; }
+html.theme-light .focus\:border-zinc-600:focus { border-color: #a1a1aa !important; }
 html.theme-light .border-zinc-700 { border-color: #d4d4d8 !important; }
 html.theme-light .border-zinc-800 { border-color: #e4e4e7 !important; }
 html.theme-light .border-zinc-900 { border-color: #f4f4f5 !important; }
 html.theme-light .hover\:border-zinc-500:hover { border-color: #71717a !important; }
+html.theme-light .hover\:border-zinc-400:hover { border-color: #71717a !important; }
 
 /* Text colors — invert lightness. Pulled darker than a strict invert so the
    "muted" labels (uppercase section headers, hints, history timestamps) stay
@@ -112,10 +119,16 @@ html.theme-light .text-zinc-500 { color: #52525b !important; }
 html.theme-light .text-zinc-600 { color: #71717a !important; }
 html.theme-light .text-zinc-700 { color: #71717a !important; }
 html.theme-light .hover\:text-zinc-100:hover { color: #000000 !important; }
+/* These two are the text-side version of the hover trap: unremapped they keep
+   their literal dark-palette value (#e4e4e7 / #d4d4d8), so hovering turned the
+   label light-grey on a near-white surface — it vanished under the cursor. */
+html.theme-light .hover\:text-zinc-200:hover { color: #18181b !important; }
+html.theme-light .hover\:text-zinc-300:hover { color: #27272a !important; }
 html.theme-light .hover\:text-white:hover { color: #000000 !important; }
 
 /* Accent panels — soften their dark backdrops in light mode */
 html.theme-light .bg-amber-900\/20 { background-color: rgba(254, 243, 199, 0.6) !important; }
+html.theme-light .bg-amber-900\/25 { background-color: rgba(254, 243, 199, 0.7) !important; }
 html.theme-light .bg-amber-900\/30 { background-color: rgba(254, 243, 199, 0.8) !important; }
 html.theme-light .border-amber-700\/50 { border-color: rgba(217, 119, 6, 0.4) !important; }
 html.theme-light .border-amber-900\/40 { border-color: rgba(217, 119, 6, 0.4) !important; }
