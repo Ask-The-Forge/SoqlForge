@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -131,7 +131,7 @@ jobs:
           echo "expected=signed" >> "$GITHUB_OUTPUT"
           echo "Certificate verified — building signed."
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -149,8 +149,10 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "SoqlForge ${{ github.ref_name }}"
           # A multi-platform release ships ~9 assets; without a key, people
-          # guess. Each job passes the same body — tauri-action sets it once
-          # when it creates the release and leaves it alone afterwards.
+          # guess. Each job passes the SAME body on purpose: since v1 the
+          # action rewrites an existing release's name and body rather than
+          # leaving them alone, so any drift between jobs would mean the last
+          # one to finish wins.
           releaseBody: |
             Already installed? Nothing to do — the app updates itself.
 
