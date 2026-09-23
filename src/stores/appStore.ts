@@ -119,6 +119,10 @@ export interface Tab {
    *  doesn't drop them. Deliberately NOT persisted — they reference records
    *  of a result that doesn't survive a relaunch either. */
   pendingEdits: PendingEdits | null;
+  /** Ids of the result rows ticked in the grid (the bulk-delete selection).
+   *  Keyed by record Id like `pendingEdits`, and on the tab for the same
+   *  reason; a new run clears it. Null = nothing selected. Not persisted. */
+  selection: ReadonlySet<string> | null;
 }
 
 interface AppState {
@@ -174,9 +178,12 @@ interface AppState {
     rowIdx: number,
     values: Record<string, PendingValue>,
   ) => void;
-  /** Drop a record from the active tab's result after it was deleted in the
-   *  org — keeps the grid honest without forcing a re-run. */
-  deleteTabRecord: (tabId: string, rowIdx: number) => void;
+  /** Drop records from a tab's result after they were deleted in the org —
+   *  keeps the grid honest without forcing a re-run. By Id, not row index:
+   *  a bulk delete finishes long after the rows' positions were captured. */
+  removeTabRecords: (tabId: string, recordIds: Iterable<string>) => void;
+  /** Replace a tab's row selection (null clears it). */
+  setTabSelection: (tabId: string, ids: ReadonlySet<string> | null) => void;
 
   // ── Batch editing ──────────────────────────────────────────────────────
   /** When true, cell edits stage into `pendingEdits` instead of writing to
@@ -220,6 +227,7 @@ function freshTab(overrides: Partial<Tab> = {}): Tab {
     lastRanQuery: null,
     resultContext: null,
     pendingEdits: null,
+    selection: null,
   };
 }
 
@@ -323,36 +331,56 @@ export const useAppStore = create<AppState>()(
             return { ...t, result: { ...t.result, records } };
           }),
         })),
-      deleteTabRecord: (tabId, rowIdx) =>
+      removeTabRecords: (tabId, recordIds) =>
         set((s) => ({
           tabs: s.tabs.map((t) => {
             if (t.id !== tabId || !t.result) return t;
-            if (rowIdx < 0 || rowIdx >= t.result.records.length) return t;
+            const gone = new Set(recordIds);
+            if (gone.size === 0) return t;
+            const records = t.result.records.filter(
+              (r) => !(typeof r.Id === "string" && gone.has(r.Id)),
+            );
+            const removed = t.result.records.length - records.length;
+            if (removed === 0) return t;
             // A deleted record's staged batch edits die with it — they'd
-            // otherwise save against a record that no longer exists.
-            const deletedId = t.result.records[rowIdx]?.Id;
+            // otherwise save against a record that no longer exists. Same for
+            // its tick in the selection.
             let pendingEdits = t.pendingEdits;
-            if (
-              typeof deletedId === "string" &&
-              pendingEdits &&
-              deletedId in pendingEdits
-            ) {
-              const { [deletedId]: _dropped, ...rest } = pendingEdits;
-              pendingEdits = Object.keys(rest).length ? rest : null;
+            if (pendingEdits) {
+              const kept = Object.entries(pendingEdits).filter(
+                ([id]) => !gone.has(id),
+              );
+              pendingEdits = kept.length ? Object.fromEntries(kept) : null;
             }
-            const records = t.result.records.filter((_, i) => i !== rowIdx);
+            let selection = t.selection;
+            if (selection) {
+              const kept = [...selection].filter((id) => !gone.has(id));
+              selection = kept.length ? new Set(kept) : null;
+            }
             return {
               ...t,
               pendingEdits,
+              selection,
               result: {
                 ...t.result,
                 records,
                 // totalSize can exceed records.length (server-side paging), so
                 // decrement it rather than resetting it to the array length.
-                totalSize: Math.max(records.length, t.result.totalSize - 1),
+                totalSize: Math.max(
+                  records.length,
+                  t.result.totalSize - removed,
+                ),
               },
             };
           }),
+        })),
+      setTabSelection: (tabId, ids) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.id === tabId
+              ? { ...t, selection: ids && ids.size > 0 ? ids : null }
+              : t,
+          ),
         })),
 
       batchEdit: false,

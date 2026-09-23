@@ -120,7 +120,8 @@ export function useQuery(): UseQueryResult {
         t.error ||
         t.lastRanQuery ||
         t.resultContext ||
-        t.pendingEdits
+        t.pendingEdits ||
+        t.selection
       ) {
         updateTab(t.id, {
           result: null,
@@ -130,6 +131,7 @@ export function useQuery(): UseQueryResult {
           // Staged batch edits target records of the org we just left —
           // they can't survive the switch any more than the result can.
           pendingEdits: null,
+          selection: null,
         });
       }
     }
@@ -216,6 +218,10 @@ export function useQuery(): UseQueryResult {
           useToolingApi: tabAtRun.useToolingApi,
           allRows: tabAtRun.allRows,
         },
+        // Ticks from the previous result don't carry over, even onto rows
+        // that came back again — a selection is the input to a bulk delete,
+        // and it should only ever hold rows picked from what's on screen.
+        selection: null,
         isRunning: false,
         runId: null,
         runStartedAt: null,
@@ -241,6 +247,7 @@ export function useQuery(): UseQueryResult {
         result: null,
         lastRanQuery: null,
         resultContext: null,
+        selection: null,
         isRunning: false,
         runId: null,
         runStartedAt: null,

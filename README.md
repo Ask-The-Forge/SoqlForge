@@ -94,6 +94,8 @@ platform. `Ctrl+Space` stays `Ctrl` everywhere — `⌘Space` belongs to Spotlig
 - Schema-aware autocomplete with relationship traversal + subquery scope
 - Ghost-text SOQL skeleton predictions (Tab to accept)
 - Inline cell editing with picklist dropdowns + boolean/date/number widgets
+- Record delete — one row, or a checkbox selection deleted in bulk (a single
+  Bulk API 2.0 job past a handful of rows), always behind a confirmation
 - CSV export with subquery flattening + native "Open" button
 - Saved queries sidebar + query history
 - NL→SOQL AI assist (BYO API key — Claude / Gemini / OpenAI).
