@@ -425,3 +425,40 @@ export async function deleteRecord(
   });
   return DeleteRecordResultSchema.parse(raw);
 }
+
+export const DeleteRecordsBulkResultSchema = z.object({
+  jobId: z.string().nullable(),
+  /** Bulk job state: "JobComplete", "InProgress" (the wait ran out),
+   *  "Aborted", … or "Unknown" when sf didn't report one. */
+  state: z.string(),
+  recordsProcessed: z.number().nullable(),
+  recordsFailed: z.number().nullable(),
+  /** Per-record outcomes; null when sf didn't report them (job still running
+   *  when the wait ran out, or a CLI that predates them). */
+  results: z
+    .object({
+      deleted: z.array(z.string()),
+      failed: z.array(z.object({ id: z.string(), error: z.string() })),
+      unprocessed: z.array(z.string()),
+    })
+    .nullable(),
+});
+export type DeleteRecordsBulkResult = z.infer<
+  typeof DeleteRecordsBulkResultSchema
+>;
+
+export interface DeleteRecordsBulkArgs {
+  orgAlias: string;
+  objectName: string;
+  recordIds: string[];
+}
+
+/** Destructive: deletes every listed record in one Bulk API 2.0 job. Callers
+ *  MUST confirm first. Standard API objects only — there's no Tooling Bulk
+ *  API, so Tooling results have to go through `deleteRecord`. */
+export async function deleteRecordsBulk(
+  args: DeleteRecordsBulkArgs,
+): Promise<DeleteRecordsBulkResult> {
+  const raw = await invoke("delete_records_bulk", { args });
+  return DeleteRecordsBulkResultSchema.parse(raw);
+}

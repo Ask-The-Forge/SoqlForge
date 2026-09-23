@@ -399,6 +399,32 @@ pub async fn run_sf_json_cancellable(
     run_id: Option<&str>,
     envs: &[(&str, String)],
 ) -> Result<Value, AppError> {
+    let envelope = run_sf_envelope(args, timeout_override, run_id, envs).await?;
+    unwrap_envelope(envelope, false)
+}
+
+/// For commands that report *partial* failure through the exit status. Bulk
+/// DML runs to completion and then sets exit code 1 when any row failed, so
+/// its envelope is `{ "status": 1, "result": {…} }` with no error `name` — and
+/// the per-row outcomes in that result are exactly what the caller needs.
+/// `run_sf_json` would flatten that into a bare "(no message)" error. A
+/// command that actually threw still comes back as an error here.
+pub async fn run_sf_json_partial_ok(
+    args: &[&str],
+    timeout_override: Option<Duration>,
+) -> Result<Value, AppError> {
+    let envelope = run_sf_envelope(args, timeout_override, None, &[]).await?;
+    unwrap_envelope(envelope, true)
+}
+
+/// Spawn `sf`, wait for it, and parse its `--json` envelope — without judging
+/// the envelope's status. See `unwrap_envelope` for that.
+async fn run_sf_envelope(
+    args: &[&str],
+    timeout_override: Option<Duration>,
+    run_id: Option<&str>,
+    envs: &[(&str, String)],
+) -> Result<Value, AppError> {
     let sf = resolve_sf()?;
     let cfg = get_config();
     let deadline = timeout_override.unwrap_or(cfg.timeout);
@@ -497,8 +523,8 @@ pub async fn run_sf_json_cancellable(
 
     // Try to parse a JSON envelope. sf occasionally interleaves a single trailing
     // line with whitespace; we'll attempt the last non-empty line as a fallback.
-    let parsed: Value = match serde_json::from_str(&payload) {
-        Ok(v) => v,
+    match serde_json::from_str(&payload) {
+        Ok(v) => Ok(v),
         Err(_) => {
             // Some sf failures (auth-not-set, missing target-org) bypass the
             // --json wrapper and print plain text like "Error (Foo): message".
@@ -516,13 +542,21 @@ pub async fn run_sf_json_cancellable(
                     "{e}; first 200 chars of output: {}",
                     payload.chars().take(200).collect::<String>()
                 ))
-            })?
+            })
         }
-    };
+    }
+}
 
-    // Inspect envelope status / known error names.
+/// Turn a parsed envelope into the command's `result`, or the error it
+/// reports. `partial_ok` keeps the result of a command that ran to completion
+/// but flagged failures via its status — see `run_sf_json_partial_ok`.
+fn unwrap_envelope(parsed: Value, partial_ok: bool) -> Result<Value, AppError> {
+    // Inspect envelope status / known error names. A thrown error always
+    // carries a `name`; a completed command never does.
     let status = parsed.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
-    if status != 0 || parsed.get("name").is_some() {
+    let threw = parsed.get("name").is_some();
+    let completed_with_failures = partial_ok && !threw && parsed.get("result").is_some();
+    if (status != 0 && !completed_with_failures) || threw {
         let name = parsed
             .get("name")
             .and_then(|v| v.as_str())
@@ -832,6 +866,56 @@ mod tests {
     #[test]
     fn extracts_text_mode_returns_none_on_clean_output() {
         assert!(extract_text_mode_sf_error("{\"status\":0,\"result\":{}}").is_none());
+    }
+
+    #[test]
+    fn unwrap_envelope_returns_result_on_success() {
+        let env = serde_json::json!({ "status": 0, "result": { "id": "001" } });
+        let r = unwrap_envelope(env, false).expect("success envelope");
+        assert_eq!(r["id"], "001");
+    }
+
+    /// What `sf data delete bulk --json` prints when some rows failed: the
+    /// command completed, so there's a result and no error name, but the exit
+    /// status is 1.
+    fn completed_with_failures() -> Value {
+        serde_json::json!({
+            "status": 1,
+            "result": { "jobInfo": { "state": "JobComplete", "numberRecordsFailed": 1 } },
+            "warnings": []
+        })
+    }
+
+    #[test]
+    fn unwrap_envelope_strict_rejects_nonzero_status_even_with_result() {
+        // Unchanged behavior for every existing caller.
+        assert!(unwrap_envelope(completed_with_failures(), false).is_err());
+    }
+
+    #[test]
+    fn unwrap_envelope_partial_ok_keeps_the_result() {
+        let r = unwrap_envelope(completed_with_failures(), true).expect("partial result");
+        assert_eq!(r["jobInfo"]["numberRecordsFailed"], 1);
+    }
+
+    #[test]
+    fn unwrap_envelope_partial_ok_still_surfaces_thrown_errors() {
+        let env = serde_json::json!({
+            "status": 1,
+            "name": "BulkJobFailedError",
+            "message": "Job 750xx failed",
+            "data": { "state": "Failed" }
+        });
+        match unwrap_envelope(env, true) {
+            Err(AppError::CliError(s)) => assert!(s.contains("Job 750xx failed"), "got: {s}"),
+            other => panic!("expected CliError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unwrap_envelope_partial_ok_rejects_failure_without_result() {
+        let env = serde_json::json!({ "status": 1 });
+        assert!(unwrap_envelope(env, true).is_err());
     }
 
     #[cfg(windows)]

@@ -14,6 +14,12 @@
  * - Leading action column: an eye button per row opens the record in
  *   Salesforce (default browser) via the org's instance URL; a trash button
  *   deletes it after an explicit confirmation dialog
+ * - Bulk delete: when the rows are deletable, a checkbox column selects them
+ *   (shift-click for a range, header box for all) and the toolbar's Delete
+ *   button — or the Delete key — removes the selection behind the same
+ *   confirmation. A handful go one `sf data delete record` call at a time;
+ *   more run as a single Bulk API 2.0 job. Failures stay selected, with
+ *   their errors listed in the dialog
  * - Column headers show the field's type (from the describe cache), with a
  *   ⨍ marker for formula fields; double-clicking a read-only cell surfaces
  *   WHY it can't be edited in a transient toolbar notice
@@ -53,6 +59,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   cancelRun,
   deleteRecord,
+  deleteRecordsBulk,
+  type DeleteRecordsBulkResult,
   type FieldInfo,
   openSavedFile,
   type QueryResult,
@@ -114,6 +122,33 @@ const ID_REGEX = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
  *  button next to it. */
 const ACTION_COL_WIDTH = 34;
 const ACTION_COL_WIDTH_WITH_DELETE = 58;
+
+/** Width (px) of the row-selection checkbox column, shown only while the
+ *  result is deletable — selecting rows is how a bulk delete is picked. */
+const SELECT_COL_WIDTH = 28;
+
+/** Deletes up to this many go one `sf data delete record` call at a time —
+ *  each is a couple of seconds, which beats a Bulk job's fixed overhead
+ *  (create, upload, then 5s status polls) and reports progress per record.
+ *  Anything bigger runs as a single Bulk API 2.0 job. */
+const PER_RECORD_DELETE_MAX = 5;
+
+/** Records named in the delete confirmation before it collapses the rest
+ *  into "…and N more". */
+const DELETE_PREVIEW_ROWS = 5;
+
+/** Failures listed in the dialog after a partial delete. A job that fails
+ *  thousands of rows doesn't need thousands of DOM nodes to say so. */
+const DELETE_FAILURES_SHOWN = 100;
+
+/** The org refused because the record is already in its Recycle Bin — an
+ *  earlier attempt landed after all, someone else got there first, or the
+ *  row came from an All Rows query. Either way it's gone, as asked. */
+const ALREADY_DELETED = /ENTITY_IS_DELETED/;
+
+function plural(n: number, word: string): string {
+  return `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+}
 
 /** Strings longer than this get an expand affordance + detail modal, since the
  *  grid clips every cell to a single line and long text areas are unreadable
@@ -584,7 +619,7 @@ function RowsGrid({
   const activeTabId = useAppStore((s) => s.activeTabId);
   const updateTabRecord = useAppStore((s) => s.updateTabRecord);
   const updateTabRecordFields = useAppStore((s) => s.updateTabRecordFields);
-  const deleteTabRecord = useAppStore((s) => s.deleteTabRecord);
+  const removeTabRecords = useAppStore((s) => s.removeTabRecords);
   const orgInstanceUrls = useAppStore((s) => s.orgInstanceUrls);
 
   // ── Batch editing ────────────────────────────────────────────────────────
@@ -887,14 +922,126 @@ function RowsGrid({
     resultContext && resultContext.org === activeOrg ? resultContext.org : null;
   const deleteObject = deleteOrg ? resultContext?.objectName ?? null : null;
   const canDelete = !!(deleteOrg && deleteObject);
+  // There's no Tooling flavour of the Bulk API, so Tooling rows always delete
+  // one call at a time.
+  const deleteViaTooling = !!resultContext?.useToolingApi;
 
+  // ── Row selection ────────────────────────────────────────────────────────
+  // The bulk-delete input. Lives on the tab (like pendingEdits) keyed by
+  // record Id, so sorting can't shift it onto other rows and switching tabs
+  // doesn't drop it. Only deletable rows can be ticked.
+  const selection = useAppStore(
+    (s) => s.tabs.find((t) => t.id === s.activeTabId)?.selection ?? null,
+  );
+  const setTabSelection = useAppStore((s) => s.setTabSelection);
+  /** Every row that can be ticked, by Id, in result order. */
+  const selectableIds = useMemo(() => {
+    if (!canDelete) return [];
+    const ids: string[] = [];
+    for (const r of records) if (typeof r.Id === "string") ids.push(r.Id);
+    return ids;
+  }, [records, canDelete]);
+  /** The ticked rows that are still in the result. */
+  const selectedIds = useMemo(
+    () => (selection ? selectableIds.filter((id) => selection.has(id)) : []),
+    [selection, selectableIds],
+  );
+  const allSelected =
+    selectableIds.length > 0 && selectedIds.length === selectableIds.length;
+  // Anchor for shift-click ranges: the row whose box was clicked last.
+  const selectAnchor = useRef<string | null>(null);
+
+  /** Tick or untick a row. With `range`, every row between it and the last
+   *  one clicked — in displayed order — follows it. */
+  function toggleRowSelected(
+    recordId: string,
+    displayIdx: number,
+    range: boolean,
+  ) {
+    // Straight from the store: two quick clicks can land before a re-render
+    // hands this closure the first one's result.
+    const current = useAppStore
+      .getState()
+      .tabs.find((t) => t.id === activeTabId)?.selection;
+    const next = new Set(current ?? []);
+    const select = !next.has(recordId);
+    const rows = rowModel.rows;
+    const anchorIdx =
+      range && selectAnchor.current
+        ? rows.findIndex((r) => r.original.Id === selectAnchor.current)
+        : -1;
+    const [from, to] =
+      anchorIdx === -1
+        ? [displayIdx, displayIdx]
+        : [Math.min(anchorIdx, displayIdx), Math.max(anchorIdx, displayIdx)];
+    for (let i = from; i <= to; i++) {
+      const id = rows[i]?.original.Id;
+      if (typeof id !== "string") continue;
+      if (select) next.add(id);
+      else next.delete(id);
+    }
+    selectAnchor.current = recordId;
+    setTabSelection(activeTabId, next);
+  }
+
+  const toggleAllSelected = () => {
+    selectAnchor.current = null;
+    setTabSelection(activeTabId, allSelected ? null : new Set(selectableIds));
+  };
+  const selectAllLabel = allSelected ? "Clear the selection" : "Select every row";
+
+  // ── Delete (one row or the selection) ────────────────────────────────────
+  /** The confirmation dialog. `ids` is what its Delete button deletes: the
+   *  trash button's row, or the selection — and, after an attempt that didn't
+   *  get them all, just the ones left, so the same button retries them. */
   const [confirmDelete, setConfirmDelete] = useState<{
-    rowIdx: number;
-    recordId: string;
-    label: string;
+    ids: string[];
+    /** recordId → why the last attempt couldn't delete it. */
+    failures: Record<string, string>;
+    /** Outcome line from the last attempt: red when it failed outright, amber
+     *  when it can't be confirmed either way. */
+    note: { tone: "error" | "warn"; text: string } | null;
+    /** Skip the Bulk API — set after a Bulk job failed as a whole, since the
+     *  per-record path also covers objects the Bulk API won't take. */
+    oneAtATime: boolean;
+    /** Nothing here can be retried (the outcome is unknown) — Close only. */
+    settled: boolean;
   } | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<
+    | { mode: "records"; done: number; total: number }
+    | { mode: "bulk"; total: number; startedAt: number }
+    | null
+  >(null);
+  // Set by the dialog's Stop button; the per-record loop checks it between
+  // calls. (A Bulk job can't be stopped from here — once uploaded, it runs in
+  // the org whether or not sf is still waiting on it.)
+  const stopDeleting = useRef(false);
+  const [stopRequested, setStopRequested] = useState(false);
+
+  // A Bulk job reports nothing until it's done, so tick an elapsed counter to
+  // show it hasn't hung.
+  const [, setBulkTick] = useState(0);
+  useEffect(() => {
+    if (deleting?.mode !== "bulk") return;
+    const t = setInterval(() => setBulkTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [deleting?.mode]);
+
+  /** Whether deleting `count` rows runs as one Bulk API job rather than one
+   *  call per record. */
+  const deletesInBulk = (count: number, oneAtATime: boolean) =>
+    !oneAtATime && !deleteViaTooling && count > PER_RECORD_DELETE_MAX;
+
+  const openDeleteDialog = (ids: string[]) => {
+    if (ids.length === 0) return;
+    setConfirmDelete({
+      ids,
+      failures: {},
+      note: null,
+      oneAtATime: false,
+      settled: false,
+    });
+  };
 
   // Esc dismisses the confirmation — but never mid-delete, where it would
   // hide a call that's still going to land.
@@ -907,30 +1054,187 @@ function RowsGrid({
     return () => window.removeEventListener("keydown", onKey);
   }, [confirmDelete, deleting]);
 
+  /** Delete what the dialog is asking about, drop whatever went from the
+   *  grid, and either close (all gone) or leave the dialog listing the rest. */
   async function doDelete() {
     if (!confirmDelete || !deleteOrg || !deleteObject) return;
-    const { rowIdx, recordId } = confirmDelete;
-    setDeleting(true);
-    setDeleteError(null);
-    try {
-      await deleteRecord({
-        orgAlias: deleteOrg,
-        objectName: deleteObject,
-        recordId,
-        useToolingApi: !!resultContext?.useToolingApi,
-      });
-      // Dropping the row shifts every index after it; anything keyed by row
-      // index (in-progress edit, cell error) is cleared by the result-change
-      // effect above, which fires because this writes a new result object.
-      deleteTabRecord(activeTabId, rowIdx);
-      setConfirmDelete(null);
-      setFlash(`Deleted ${deleteObject} ${recordId}`);
-    } catch (e) {
-      setDeleteError(toAppError(e).message);
-    } finally {
-      setDeleting(false);
+    const { ids } = confirmDelete;
+    const useBulk = deletesInBulk(ids.length, confirmDelete.oneAtATime);
+
+    const gone: string[] = [];
+    let alreadyGone = 0;
+    const failures: Record<string, string> = {};
+    const recordFailure = (id: string, error: string) => {
+      if (ALREADY_DELETED.test(error)) {
+        gone.push(id);
+        alreadyGone++;
+      } else {
+        failures[id] = error;
+      }
+    };
+    let stopped = false;
+
+    if (useBulk) {
+      setDeleting({ mode: "bulk", total: ids.length, startedAt: Date.now() });
+      let res: DeleteRecordsBulkResult;
+      try {
+        res = await deleteRecordsBulk({
+          orgAlias: deleteOrg,
+          objectName: deleteObject,
+          recordIds: ids,
+        });
+      } catch (e) {
+        // The job failed as a whole, or never started (an object the Bulk
+        // API doesn't support, a missing permission) — nothing to take off
+        // the grid. Offer the per-record path instead.
+        setConfirmDelete({
+          ids,
+          failures: {},
+          note: {
+            tone: "error",
+            text: `The Bulk API delete failed: ${toAppError(e).message}`,
+          },
+          oneAtATime: true,
+          settled: false,
+        });
+        return;
+      } finally {
+        setDeleting(null);
+      }
+      // Without per-record results a clean, complete job still proves every
+      // row went; anything short of that can't be pinned to rows.
+      const outcomes =
+        res.results ??
+        (res.state === "JobComplete" &&
+        res.recordsFailed === 0 &&
+        res.recordsProcessed === ids.length
+          ? { deleted: ids, failed: [], unprocessed: [] }
+          : null);
+      if (!outcomes) {
+        const job = res.jobId ? ` ${res.jobId}` : "";
+        const ended = ["JobComplete", "Aborted", "Failed"].includes(res.state);
+        setConfirmDelete({
+          ids,
+          failures: {},
+          note: {
+            tone: "warn",
+            text: ended
+              ? `The Bulk API job${job} ended (${res.state}) without saying which records it deleted. Re-run the query to see what's left.`
+              : `The Bulk API job${job} is still running in the org (${res.state}). Re-run the query in a few minutes to see what's left.`,
+          },
+          oneAtATime: false,
+          settled: true,
+        });
+        return;
+      }
+      gone.push(...outcomes.deleted);
+      for (const f of outcomes.failed) recordFailure(f.id, f.error);
+      // `unprocessed` rows were never attempted: they stay in `ids` below
+      // with no error, same as rows a Stop skipped.
+    } else {
+      stopDeleting.current = false;
+      setStopRequested(false);
+      setDeleting({ mode: "records", done: 0, total: ids.length });
+      try {
+        for (let i = 0; i < ids.length; i++) {
+          if (stopDeleting.current) {
+            stopped = true;
+            break;
+          }
+          try {
+            await deleteRecord({
+              orgAlias: deleteOrg,
+              objectName: deleteObject,
+              recordId: ids[i],
+              useToolingApi: deleteViaTooling,
+            });
+            gone.push(ids[i]);
+          } catch (e) {
+            recordFailure(ids[i], toAppError(e).message);
+          }
+          setDeleting({ mode: "records", done: i + 1, total: ids.length });
+        }
+      } finally {
+        setDeleting(null);
+      }
     }
+
+    // Anything keyed by row index (in-progress edit, cell error) is cleared by
+    // the result-change effect above, which fires because this writes a new
+    // result object.
+    removeTabRecords(activeTabId, gone);
+    const goneSet = new Set(gone);
+    const left = ids.filter((id) => !goneSet.has(id));
+
+    if (left.length === 0) {
+      setConfirmDelete(null);
+      setFlash(
+        (ids.length === 1
+          ? `Deleted ${deleteObject} ${ids[0]}`
+          : `Deleted ${plural(ids.length, `${deleteObject} record`)}`) +
+          (alreadyGone > 0 && ids.length > 1
+            ? ` (${alreadyGone.toLocaleString()} already in the Recycle Bin)`
+            : ""),
+      );
+      return;
+    }
+
+    const failedCount = left.filter((id) => id in failures).length;
+    const skipped = left.length - failedCount;
+    // A single record's failure speaks for itself in the error list.
+    const summary =
+      ids.length === 1
+        ? null
+        : [
+            `Deleted ${gone.length.toLocaleString()} of ${ids.length.toLocaleString()}.`,
+            failedCount > 0
+              ? `${plural(failedCount, "record")} couldn't be deleted.`
+              : "",
+            skipped > 0
+              ? stopped
+                ? `Stopped before the other ${skipped.toLocaleString()}.`
+                : `The Bulk job didn't reach the other ${skipped.toLocaleString()}.`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+    setConfirmDelete({
+      ids: left,
+      failures,
+      note: summary ? { tone: "error", text: summary } : null,
+      oneAtATime: false,
+      settled: false,
+    });
   }
+
+  /** Delete / Backspace in the grid deletes the selection (after the usual
+   *  confirmation) — unless the key is editing text. */
+  const onGridKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    const t = e.target as HTMLElement;
+    const typing =
+      t.isContentEditable ||
+      t instanceof HTMLTextAreaElement ||
+      t instanceof HTMLSelectElement ||
+      (t instanceof HTMLInputElement && t.type !== "checkbox");
+    if (typing || selectedIds.length === 0 || confirmDelete || savingAll) return;
+    e.preventDefault();
+    openDeleteDialog(selectedIds);
+  };
+
+  /** Row lookup for the delete dialog's labels — built only while it's open. */
+  const deleteDialogOpen = confirmDelete !== null;
+  const recordsById = useMemo(() => {
+    const map = new Map<string, Row>();
+    if (!deleteDialogOpen) return map;
+    for (const r of records) if (typeof r.Id === "string") map.set(r.Id, r);
+    return map;
+  }, [records, deleteDialogOpen]);
+  const labelFor = (id: string) => {
+    const r = recordsById.get(id);
+    const label = r ? pickDisplayValue(r) : "";
+    return label && label !== id ? label : null;
+  };
 
   /** The table exactly as displayed — current sort, current column order.
    *  Both the CSV export and the clipboard copy go through this so what you
@@ -1267,6 +1571,24 @@ function RowsGrid({
   const actionColWidth = canDelete
     ? ACTION_COL_WIDTH_WITH_DELETE
     : ACTION_COL_WIDTH;
+  const selectColWidth = canDelete ? SELECT_COL_WIDTH : 0;
+  /** Columns ahead of the data: the action column, plus the checkboxes. */
+  const leadingCols = canDelete ? 2 : 1;
+
+  const deleteCount = confirmDelete?.ids.length ?? 0;
+  const deleteHasFailures =
+    !!confirmDelete && Object.keys(confirmDelete.failures).length > 0;
+  /** The dialog already ran an attempt — it's reporting now, not asking. */
+  const deleteAttempted =
+    !!confirmDelete && (confirmDelete.note !== null || deleteHasFailures);
+  // Per-record errors are the point of the list after a partial failure, so
+  // show them all (to a cap); otherwise a short preview names the records.
+  const deleteShown = confirmDelete
+    ? confirmDelete.ids.slice(
+        0,
+        deleteHasFailures ? DELETE_FAILURES_SHOWN : DELETE_PREVIEW_ROWS,
+      )
+    : [];
   const virtualRows = virtualizer.getVirtualItems();
   const paddingTop = virtualRows[0]?.start ?? 0;
   const paddingBottom =
@@ -1289,6 +1611,29 @@ function RowsGrid({
         </span>
         <span className="text-zinc-600">·</span>
         <span>{columnPaths.length} columns</span>
+        {selectedIds.length > 0 && (
+          <>
+            <span className="text-zinc-600">·</span>
+            <span className="text-zinc-300 whitespace-nowrap">
+              {selectedIds.length.toLocaleString()} selected
+            </span>
+            <button
+              onClick={() => openDeleteDialog(selectedIds)}
+              disabled={!!savingAll}
+              className="text-red-300 hover:text-red-100 border border-red-900/50 hover:border-red-700 rounded px-2 py-0.5 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+              title={`Delete the selected ${deleteObject} records from the org — asks first (Delete key)`}
+            >
+              Delete {selectedIds.length.toLocaleString()}
+            </button>
+            <button
+              onClick={() => setTabSelection(activeTabId, null)}
+              className="text-zinc-400 hover:text-zinc-200 whitespace-nowrap"
+              title="Clear the selection"
+            >
+              Clear
+            </button>
+          </>
+        )}
         {fieldsLoading && (
           <span
             className="flex items-center gap-1.5 text-zinc-500"
@@ -1436,16 +1781,47 @@ function RowsGrid({
 
       <div
         ref={containerRef}
-        className="flex-1 overflow-auto"
+        // Focusable (but not a tab stop) so Delete / Backspace reach
+        // onGridKeyDown after a click anywhere in the grid.
+        tabIndex={-1}
+        onKeyDown={onGridKeyDown}
+        className="flex-1 overflow-auto outline-none"
         style={{ contain: "strict" }}
       >
         <table
           className="border-separate border-spacing-0 text-xs"
-          style={{ width: totalWidth + actionColWidth, tableLayout: "fixed" }}
+          style={{
+            width: totalWidth + actionColWidth + selectColWidth,
+            tableLayout: "fixed",
+          }}
         >
           <thead className="sticky top-0 z-10 bg-zinc-900">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
+                {canDelete && (
+                  <th
+                    style={{ width: selectColWidth }}
+                    className="py-1.5 text-center border-b border-r border-zinc-700 bg-zinc-900 align-middle"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => {
+                        // "Some selected" has no attribute form — it's a
+                        // DOM-only property.
+                        if (el) {
+                          el.indeterminate =
+                            selectedIds.length > 0 && !allSelected;
+                        }
+                      }}
+                      onChange={toggleAllSelected}
+                      disabled={selectableIds.length === 0}
+                      className="accent-blue-600 cursor-pointer align-middle disabled:cursor-default"
+                      title={selectAllLabel}
+                      aria-label={selectAllLabel}
+                    />
+                  </th>
+                )}
                 <th
                   style={{ width: actionColWidth }}
                   className="px-1 py-1.5 border-b border-r border-zinc-700 bg-zinc-900"
@@ -1539,7 +1915,10 @@ function RowsGrid({
           <tbody>
             {paddingTop > 0 && (
               <tr>
-                <td colSpan={columns.length + 1} style={{ height: paddingTop }} />
+                <td
+                  colSpan={columns.length + leadingCols}
+                  style={{ height: paddingTop }}
+                />
               </tr>
             )}
             {virtualRows.map((vr) => {
@@ -1559,15 +1938,49 @@ function RowsGrid({
                 ? pendingEdits?.[recordId]
                 : undefined;
               const batchErrHere = recordId ? batchErrors[recordId] : undefined;
+              const isSelected =
+                canDelete && !!recordId && !!selection?.has(recordId);
+              // The tint goes on the cells: the row's own striping classes
+              // out-rank a plain background utility on the <tr>.
+              const selectedTint = isSelected ? "bg-blue-950/30 " : "";
               return (
                 <tr
                   key={row.id}
                   className="odd:bg-zinc-950 even:bg-zinc-900/40 hover:bg-zinc-800/50"
                   style={{ height: vr.size }}
                 >
+                  {canDelete && (
+                    <td
+                      style={{ width: selectColWidth }}
+                      className={
+                        selectedTint +
+                        "text-center border-b border-r border-zinc-800 align-middle"
+                      }
+                    >
+                      {recordId && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={(e) =>
+                            toggleRowSelected(
+                              recordId,
+                              vr.index,
+                              (e.nativeEvent as MouseEvent).shiftKey,
+                            )
+                          }
+                          className="accent-blue-600 cursor-pointer align-middle"
+                          title="Select row — Shift-click to select a range"
+                          aria-label="Select row"
+                        />
+                      )}
+                    </td>
+                  )}
                   <td
                     style={{ width: actionColWidth }}
-                    className="px-1 border-b border-r border-zinc-800 align-middle"
+                    className={
+                      selectedTint +
+                      "px-1 border-b border-r border-zinc-800 align-middle"
+                    }
                   >
                     <div className="flex items-center justify-center gap-1.5">
                       {recordId && instanceUrl && (
@@ -1587,12 +2000,7 @@ function RowsGrid({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setDeleteError(null);
-                            setConfirmDelete({
-                              rowIdx: originalRowIdx,
-                              recordId,
-                              label: pickDisplayValue(row.original),
-                            });
+                            openDeleteDialog([recordId]);
                           }}
                           className="text-zinc-600 hover:text-red-400 transition-colors"
                           title={`Delete this ${deleteObject} record`}
@@ -1644,6 +2052,8 @@ function RowsGrid({
                               ? "bg-red-950/40 "
                               : "bg-amber-900/25 "
                             : "") +
+                          // Error / staged-edit fills win over the selection's.
+                          (errHere || hasPending ? "" : selectedTint) +
                           (field ? "cursor-cell" : "")
                         }
                         title={
@@ -1731,7 +2141,7 @@ function RowsGrid({
             {paddingBottom > 0 && (
               <tr>
                 <td
-                  colSpan={columns.length + 1}
+                  colSpan={columns.length + leadingCols}
                   style={{ height: paddingBottom }}
                 />
               </tr>
@@ -1905,55 +2315,127 @@ function RowsGrid({
             role="dialog"
             aria-modal="true"
             aria-label="Confirm delete"
-            className="flex flex-col w-full max-w-md bg-zinc-900 border border-red-900/50 rounded-lg shadow-2xl"
+            className={
+              "flex flex-col w-full bg-zinc-900 border border-red-900/50 rounded-lg shadow-2xl " +
+              (deleteCount > 1 ? "max-w-lg" : "max-w-md")
+            }
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-3 border-b border-zinc-800 text-sm font-medium text-zinc-100">
-              Delete this {deleteObject} record?
+              {deleteCount === 1
+                ? `Delete this ${deleteObject} record?`
+                : `Delete ${plural(deleteCount, `${deleteObject} record`)}?`}
             </div>
 
             <div className="flex flex-col gap-2 px-4 py-3 text-xs text-zinc-300">
-              {confirmDelete.label &&
-                confirmDelete.label !== confirmDelete.recordId && (
-                  <div className="truncate" title={confirmDelete.label}>
-                    {confirmDelete.label}
-                  </div>
-                )}
-              <div className="font-mono text-zinc-400">
-                {confirmDelete.recordId}
-              </div>
-              <div className="text-amber-400/90">
-                Deletes it in org{" "}
-                <span className="font-mono">{deleteOrg}</span>
-                {resultContext?.useToolingApi ? " via the Tooling API" : ""}.
-                Most objects land in the org's Recycle Bin; some are gone for
-                good.
-              </div>
-              {deleteError && (
-                <div className="max-h-40 overflow-auto rounded border border-red-900/50 bg-red-950/40 p-2 font-mono text-red-300 whitespace-pre-wrap break-words">
-                  {deleteError}
+              {confirmDelete.note && (
+                <div
+                  className={
+                    confirmDelete.note.tone === "error"
+                      ? "text-red-400"
+                      : "text-amber-400"
+                  }
+                >
+                  {confirmDelete.note.text}
+                </div>
+              )}
+              <ul className="flex flex-col gap-2 max-h-60 overflow-auto">
+                {deleteShown.map((id) => {
+                  const label = labelFor(id);
+                  const error = confirmDelete.failures[id];
+                  return (
+                    <li key={id} className="min-w-0">
+                      {label && (
+                        <div className="truncate" title={label}>
+                          {label}
+                        </div>
+                      )}
+                      <div className="font-mono text-zinc-400">{id}</div>
+                      {error && (
+                        <div className="mt-1 rounded border border-red-900/50 bg-red-950/40 px-2 py-1 font-mono text-red-300 whitespace-pre-wrap break-words">
+                          {error}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+              {deleteCount > deleteShown.length && (
+                <div className="text-zinc-500">
+                  …and {(deleteCount - deleteShown.length).toLocaleString()}{" "}
+                  more
+                </div>
+              )}
+              {!confirmDelete.settled && (
+                <div className="text-amber-400/90">
+                  Deletes {deleteCount === 1 ? "it" : "them"} in org{" "}
+                  <span className="font-mono">{deleteOrg}</span>
+                  {deleteViaTooling ? " via the Tooling API" : ""}
+                  {deletesInBulk(deleteCount, confirmDelete.oneAtATime)
+                    ? " as a single Bulk API 2.0 job"
+                    : deleteCount > 1
+                      ? ", one record at a time"
+                      : ""}
+                  . Most objects land in the org's Recycle Bin; some are gone
+                  for good.
                 </div>
               )}
             </div>
 
             <div className="flex items-center justify-end gap-2 px-4 py-2.5 border-t border-zinc-800">
-              <button
-                autoFocus
-                onClick={() => setConfirmDelete(null)}
-                disabled={deleting}
-                className="text-xs text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-3 py-1 disabled:opacity-50"
-                title="Close without deleting (Esc)"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => void doDelete()}
-                disabled={deleting}
-                className="flex items-center gap-1.5 text-xs text-white bg-red-700 hover:bg-red-600 rounded px-3 py-1 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {deleting && <Spinner />}
-                {deleting ? "Deleting…" : "Delete"}
-              </button>
+              {deleting && deleteCount > 1 && (
+                <span className="mr-auto flex items-center gap-1.5 text-xs text-zinc-400 whitespace-nowrap">
+                  <Spinner label="Deleting records" />
+                  {deleting.mode === "records"
+                    ? `Deleting ${Math.min(deleting.done + 1, deleting.total).toLocaleString()} of ${deleting.total.toLocaleString()}…`
+                    : `Bulk API job running · ${Math.floor(
+                        (Date.now() - deleting.startedAt) / 1000,
+                      )}s`}
+                </span>
+              )}
+              {deleting?.mode === "records" && deleteCount > 1 ? (
+                <button
+                  onClick={() => {
+                    stopDeleting.current = true;
+                    setStopRequested(true);
+                  }}
+                  disabled={stopRequested}
+                  className="text-xs text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-3 py-1 disabled:opacity-50"
+                  title="Stop after the record being deleted now — the rest are left alone"
+                >
+                  {stopRequested ? "Stopping…" : "Stop"}
+                </button>
+              ) : (
+                <button
+                  autoFocus
+                  onClick={() => setConfirmDelete(null)}
+                  disabled={!!deleting}
+                  className="text-xs text-zinc-300 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-3 py-1 disabled:opacity-50"
+                  title={
+                    deleting?.mode === "bulk"
+                      ? "A Bulk job keeps running in the org once it's uploaded — wait for it to report back"
+                      : "Close without deleting (Esc)"
+                  }
+                >
+                  {deleteAttempted ? "Close" : "Cancel"}
+                </button>
+              )}
+              {!confirmDelete.settled && (
+                <button
+                  onClick={() => void doDelete()}
+                  disabled={!!deleting}
+                  className="flex items-center gap-1.5 text-xs text-white bg-red-700 hover:bg-red-600 rounded px-3 py-1 whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {deleting && <Spinner />}
+                  {deleting
+                    ? "Deleting…"
+                    : confirmDelete.oneAtATime
+                      ? "Delete one at a time"
+                      : deleteCount > 1
+                        ? `Delete ${deleteCount.toLocaleString()}`
+                        : "Delete"}
+                </button>
+              )}
             </div>
           </div>
         </div>

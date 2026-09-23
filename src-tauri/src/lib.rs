@@ -49,6 +49,7 @@ pub fn run() {
             commands::export::open_saved_file,
             commands::update::update_record,
             commands::delete::delete_record,
+            commands::delete::delete_records_bulk,
             commands::org_manage::org_login_web,
             commands::org_manage::org_logout,
             commands::org_manage::org_set_default,
